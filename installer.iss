@@ -1,5 +1,5 @@
 #define MyAppName "ShelfClip"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "Vinicius"
 #define MyAppExeName "ShelfClip.exe"
 #define SourceDir "E:\OneDrive\CLAUDE CLI\YOINK WINDOWS\dist"
