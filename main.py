@@ -952,36 +952,35 @@ class ShelfWindow(QWidget):
             self._poll_cursor_multi()
 
     def _poll_cursor_multi(self):
-        """Multi-monitor poll: shelf tracks cursor's current screen."""
+        """Multi-monitor poll: same trigger as single mode but on cursor's current screen."""
+        side = self._settings["side"]
         cursor = QCursor.pos()
+        over_win = self._is_shown and self.geometry().contains(cursor)
 
         cursor_screen = QGuiApplication.screenAt(cursor)
         if cursor_screen is None:
             return
 
-        # First time — initialise current screen
         if self._current_screen is None:
             self._current_screen = cursor_screen
-            return
 
-        # Same screen — show only if shelf has items
         if cursor_screen == self._current_screen:
             self._monitor_switch_timer.stop()
-            if self.items:
+            dragging_near_edge = near_edge(side, self._current_screen, cursor) and is_dragging()
+            if dragging_near_edge or over_win:
                 self._collapse_timer.stop()
                 if not self._is_shown:
                     self._slide_in(screen=self._current_screen)
             else:
-                if self._is_shown and not self._collapse_timer.isActive():
+                if self._is_shown and not self.items and not self._collapse_timer.isActive():
                     self._collapse_timer.start(1200)
-            return
-
-        # Cursor on a different screen — start/restart the 400ms debounce
-        if not self._monitor_switch_timer.isActive():
-            self._monitor_switch_timer.start()
+        else:
+            # Cursor on a different screen — debounce before switching
+            if not self._monitor_switch_timer.isActive():
+                self._monitor_switch_timer.start()
 
     def _on_monitor_switch(self):
-        """Called 400ms after the cursor has been on a new screen — slide the shelf over."""
+        """Called 400ms after cursor moved to a new screen — move shelf there if visible."""
         new_screen = QGuiApplication.screenAt(QCursor.pos())
         if new_screen is None or new_screen == self._current_screen:
             return
@@ -995,13 +994,10 @@ class ShelfWindow(QWidget):
         old_screen = self._current_screen
         self._current_screen = new_screen
 
-        def after_out():
-            self._slide_in(screen=new_screen)
-
         if self._is_shown:
+            def after_out():
+                self._slide_in(screen=new_screen)
             self._slide_out(screen=old_screen, on_complete=after_out)
-        else:
-            self._slide_in(screen=new_screen)
 
     # ── Slide animations ──────────────────────────────────────────────────
     def _slide_in(self, screen: QScreen | None = None):
