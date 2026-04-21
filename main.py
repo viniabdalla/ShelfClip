@@ -468,6 +468,41 @@ class SettingsDialog(QDialog):
         sep3.setStyleSheet(f"background: {T['border']};")
         layout.addWidget(sep3)
 
+        # ── Monitor mode ──────────────────────────────────────────────────
+        mon_lbl = QLabel("Monitor mode")
+        mon_lbl.setStyleSheet(
+            f"color: {T['text_secondary']}; font-size: 10px; "
+            "background: transparent; border: none;"
+        )
+        layout.addWidget(mon_lbl)
+
+        self._mon_group = QButtonGroup(self)
+        for label, value in [("Single Monitor", "single"), ("Multi-Monitor", "multi")]:
+            rb = QRadioButton(label)
+            rb.setProperty("value", value)
+            rb.setChecked(self.settings.get("monitor_mode", "single") == value)
+            rb.setStyleSheet(f"""
+                QRadioButton {{
+                    color: {T['text_primary']}; font-size: 11px;
+                    background: transparent; border: none; spacing: 8px;
+                }}
+                QRadioButton::indicator {{
+                    width: 14px; height: 14px; border-radius: 7px;
+                    border: 2px solid {T['border_hover']}; background: transparent;
+                }}
+                QRadioButton::indicator:checked {{
+                    background: {T['accent']}; border-color: {T['accent']};
+                }}
+            """)
+            self._mon_group.addButton(rb)
+            layout.addWidget(rb)
+
+        sep_mon = QFrame()
+        sep_mon.setFrameShape(QFrame.Shape.HLine)
+        sep_mon.setFixedHeight(1)
+        sep_mon.setStyleSheet(f"background: {T['border']};")
+        layout.addWidget(sep_mon)
+
         # ── Dark mode ─────────────────────────────────────────────────────
         dark_row = QHBoxLayout()
         dark_lbl = QLabel("Dark mode")
@@ -563,6 +598,10 @@ class SettingsDialog(QDialog):
         self.settings["show_time"] = self._show_time_spin.value()
         self.settings["dark_mode"] = self._dark_check.isChecked()
         self.settings["opacity"] = self._opacity_slider.value()
+        for btn in self._mon_group.buttons():
+            if btn.isChecked():
+                self.settings["monitor_mode"] = btn.property("value")
+                break
         self.accept()
 
     def showEvent(self, e):
