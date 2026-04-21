@@ -952,23 +952,14 @@ class ShelfWindow(QWidget):
             self._poll_cursor_multi()
 
     def _poll_cursor_multi(self):
-        """Multi-monitor poll: shelf follows cursor across screens while dragging."""
-        side = self._settings["side"]
+        """Multi-monitor poll: shelf tracks cursor's current screen."""
         cursor = QCursor.pos()
-        over_win = self._is_shown and self.geometry().contains(cursor)
-        dragging = is_dragging()
-
-        if not dragging and not over_win:
-            self._current_screen = None
-            if self._is_shown and not self.items and not self._collapse_timer.isActive():
-                self._collapse_timer.start(1200)
-            return
 
         cursor_screen = QGuiApplication.screenAt(cursor)
         if cursor_screen is None:
             return
 
-        # First drag ever — initialise and show
+        # First time — initialise and show on current screen
         if self._current_screen is None:
             self._current_screen = cursor_screen
             self._collapse_timer.stop()
@@ -976,21 +967,16 @@ class ShelfWindow(QWidget):
                 self._slide_in(screen=self._current_screen)
             return
 
-        # Same screen — standard near-edge / over-window logic
+        # Same screen — keep shelf visible
         if cursor_screen == self._current_screen:
             self._monitor_switch_timer.stop()
-            near = near_edge(side, self._current_screen, cursor)
-            if (dragging and near) or over_win:
-                self._collapse_timer.stop()
-                if not self._is_shown:
-                    self._slide_in(screen=self._current_screen)
-            else:
-                if self._is_shown and not self.items and not self._collapse_timer.isActive():
-                    self._collapse_timer.start(1200)
+            self._collapse_timer.stop()
+            if not self._is_shown:
+                self._slide_in(screen=self._current_screen)
             return
 
         # Cursor on a different screen — start/restart the 400ms debounce
-        if dragging and not self._monitor_switch_timer.isActive():
+        if not self._monitor_switch_timer.isActive():
             self._monitor_switch_timer.start()
 
     def _on_monitor_switch(self):
