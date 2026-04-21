@@ -825,6 +825,12 @@ class ShelfWindow(QWidget):
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._slide_out)
+
+        self._current_screen: QScreen | None = None
+        self._monitor_switch_timer = QTimer(self)
+        self._monitor_switch_timer.setSingleShot(True)
+        self._monitor_switch_timer.setInterval(400)
+        self._monitor_switch_timer.timeout.connect(self._on_monitor_switch)
         self._setup_window()
         self._build_ui()
         self._setup_tray()
