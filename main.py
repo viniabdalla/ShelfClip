@@ -959,20 +959,21 @@ class ShelfWindow(QWidget):
         if cursor_screen is None:
             return
 
-        # First time — initialise and show on current screen
+        # First time — initialise current screen
         if self._current_screen is None:
             self._current_screen = cursor_screen
-            self._collapse_timer.stop()
-            if not self._is_shown:
-                self._slide_in(screen=self._current_screen)
             return
 
-        # Same screen — keep shelf visible
+        # Same screen — show only if shelf has items
         if cursor_screen == self._current_screen:
             self._monitor_switch_timer.stop()
-            self._collapse_timer.stop()
-            if not self._is_shown:
-                self._slide_in(screen=self._current_screen)
+            if self.items:
+                self._collapse_timer.stop()
+                if not self._is_shown:
+                    self._slide_in(screen=self._current_screen)
+            else:
+                if self._is_shown and not self._collapse_timer.isActive():
+                    self._collapse_timer.start(1200)
             return
 
         # Cursor on a different screen — start/restart the 400ms debounce
