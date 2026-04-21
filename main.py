@@ -875,6 +875,7 @@ class ShelfWindow(QWidget):
     def _toggle_shelf(self):
         if self._is_shown:
             self._collapse_timer.stop()
+            self._current_screen = None
             self._slide_out()
         else:
             if self._settings.get("monitor_mode", "single") == "multi":
@@ -919,6 +920,7 @@ class ShelfWindow(QWidget):
         dragging = is_dragging()
 
         if not dragging and not over_win:
+            self._current_screen = None
             if self._is_shown and not self.items and not self._collapse_timer.isActive():
                 self._collapse_timer.start(1200)
             return
@@ -949,7 +951,7 @@ class ShelfWindow(QWidget):
             return
 
         # Cursor on a different screen — start/restart the 400ms debounce
-        if not self._monitor_switch_timer.isActive():
+        if dragging and not self._monitor_switch_timer.isActive():
             self._monitor_switch_timer.start()
 
     def _on_monitor_switch(self):
@@ -957,6 +959,9 @@ class ShelfWindow(QWidget):
         new_screen = QGuiApplication.screenAt(QCursor.pos())
         if new_screen is None or new_screen == self._current_screen:
             return
+
+        if hasattr(self, "_anim") and self._anim and self._anim.state() == QPropertyAnimation.State.Running:
+            self._anim.stop()
 
         old_screen = self._current_screen
         self._current_screen = new_screen
