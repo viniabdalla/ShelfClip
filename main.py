@@ -999,8 +999,11 @@ class ShelfWindow(QWidget):
         if new_screen is None or new_screen == self._current_screen:
             return
 
-        if hasattr(self, "_anim") and self._anim and self._anim.state() == QPropertyAnimation.State.Running:
-            self._anim.stop()
+        try:
+            if hasattr(self, "_anim") and self._anim and self._anim.state() == QPropertyAnimation.State.Running:
+                self._anim.stop()
+        except RuntimeError:
+            pass
 
         old_screen = self._current_screen
         self._current_screen = new_screen
