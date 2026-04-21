@@ -16,15 +16,15 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QFrame, QDialog,
     QRadioButton, QButtonGroup, QSizePolicy, QSpinBox,
-    QSystemTrayIcon, QMenu, QFileIconProvider
+    QSystemTrayIcon, QMenu, QFileIconProvider, QCheckBox, QSlider
 )
 from PyQt6.QtCore import (
-    Qt, QMimeData, QUrl, QPoint, QRect, QTimer, QSize,
+    Qt, QMimeData, QUrl, QPoint, QRect, QRectF, QPointF, QTimer, QSize,
     QPropertyAnimation, QEasingCurve, QFileInfo,
     QAbstractNativeEventFilter
 )
 from PyQt6.QtGui import (
-    QDrag, QPixmap, QIcon, QColor, QPainter,
+    QDrag, QPixmap, QIcon, QColor, QPainter, QPen, QLinearGradient,
     QFont, QImage, QGuiApplication, QCursor, QAction, QScreen,
     QKeySequence
 )
@@ -39,21 +39,74 @@ TEMP_DIR      = Path(tempfile.gettempdir()) / "shelfclip"
 TEMP_DIR.mkdir(exist_ok=True)
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
-BG_HOVER_COLOR = "rgba(22, 22, 35, 245)"
-ITEM_BG        = "rgba(255, 255, 255, 12)"
-ITEM_BG_HOVER  = "rgba(255, 255, 255, 22)"
-ACCENT         = "#5b9cf6"
-TEXT_PRIMARY   = "rgba(255, 255, 255, 220)"
-TEXT_SECONDARY = "rgba(255, 255, 255, 100)"
-BORDER         = "rgba(255, 255, 255, 25)"
-BORDER_HOVER   = "rgba(255, 255, 255, 45)"
-SWITCH_BG      = "#4f97f2"
-SWITCH_KNOB    = "#f6f7fb"
+CARD_RADIUS   = 20
+ITEM_RADIUS   = 11
+
+SWITCH_BG   = "#4f97f2"
+SWITCH_KNOB = "#f6f7fb"
+
+# ── Theme ─────────────────────────────────────────────────────────────────────
+_DARK = dict(
+    bg=(20, 20, 32, 225),
+    bg_dimmed=(14, 14, 24, 165),
+    glass_hi=(255, 255, 255, 26),
+    glass_border=(255, 255, 255, 38),
+    item_bg="rgba(255,255,255,12)",
+    item_bg_hover="rgba(255,255,255,22)",
+    item_sel="rgba(91,156,246,70)",
+    item_sel_hover="rgba(91,156,246,100)",
+    item_sel_border="rgba(91,156,246,180)",
+    text_primary="rgba(255,255,255,220)",
+    text_secondary="rgba(255,255,255,100)",
+    border="rgba(255,255,255,25)",
+    border_hover="rgba(255,255,255,45)",
+    accent="#5b9cf6",
+    accent_hover="#4a8ce0",
+    drop_hint_border="rgba(255,255,255,40)",
+    scrollbar="rgba(255,255,255,8)",
+    scrollbar_handle="rgba(255,255,255,55)",
+    close_btn_bg="rgba(255,255,255,15)",
+    settings_bg=(22, 22, 35, 252),
+    settings_border="rgba(255,255,255,40)",
+)
+
+_LIGHT = dict(
+    bg=(242, 245, 255, 210),
+    bg_dimmed=(235, 239, 252, 150),
+    glass_hi=(255, 255, 255, 90),
+    glass_border=(255, 255, 255, 130),
+    item_bg="rgba(0,0,0,7)",
+    item_bg_hover="rgba(0,0,0,13)",
+    item_sel="rgba(58,125,212,55)",
+    item_sel_hover="rgba(58,125,212,85)",
+    item_sel_border="rgba(58,125,212,160)",
+    text_primary="rgba(22,26,50,220)",
+    text_secondary="rgba(75,82,110,160)",
+    border="rgba(0,0,0,18)",
+    border_hover="rgba(0,0,0,35)",
+    accent="#3a7dd4",
+    accent_hover="#2d6bbf",
+    drop_hint_border="rgba(0,0,0,30)",
+    scrollbar="rgba(0,0,0,8)",
+    scrollbar_handle="rgba(0,0,0,35)",
+    close_btn_bg="rgba(0,0,0,10)",
+    settings_bg=(244, 247, 255, 252),
+    settings_border="rgba(0,0,0,20)",
+)
+
+THEME: dict = _DARK  # updated at runtime via _apply_theme()
+OPACITY: float = 0.9  # 0.2–1.0, updated at runtime via _apply_theme()
+
+
+def set_theme(dark: bool, opacity: float = 0.9):
+    global THEME, OPACITY
+    THEME = _DARK if dark else _LIGHT
+    OPACITY = max(0.2, min(1.0, opacity))
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 def load_settings() -> dict:
-    defaults = {"side": "right", "hotkey": "ctrl+y", "show_time": 4}
+    defaults = {"side": "right", "hotkey": "ctrl+y", "show_time": 4, "dark_mode": True, "opacity": 90}
     if SETTINGS_FILE.exists():
         try:
             data = json.loads(SETTINGS_FILE.read_text())
@@ -142,7 +195,6 @@ def make_side_switch_icon(side: str) -> QIcon:
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor(SWITCH_BG))
     p.drawRoundedRect(0, 0, 34, 20, 10, 10)
-
     knob_x = 2 if side == "left" else 16
     p.setBrush(QColor(0, 0, 0, 40))
     p.drawEllipse(knob_x, 3, 16, 16)
@@ -150,6 +202,61 @@ def make_side_switch_icon(side: str) -> QIcon:
     p.drawEllipse(knob_x, 2, 16, 16)
     p.end()
     return QIcon(px)
+
+
+# ── Glass card widget ─────────────────────────────────────────────────────────
+class GlassCard(QWidget):
+    """Frosted-glass panel — all painting done in paintEvent, no CSS background."""
+
+    def __init__(self, radius: int = CARD_RADIUS, parent=None):
+        super().__init__(parent)
+        self.radius = radius
+        self._dimmed = False
+        # WA_NoSystemBackground tells Qt not to paint the system background before
+        # our paintEvent runs. WA_TranslucentBackground must NOT be set on child
+        # widgets — it is only valid on top-level windows and causes a ghost outer
+        # border when used on a child.
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+
+    def set_dimmed(self, dimmed: bool):
+        if self._dimmed != dimmed:
+            self._dimmed = dimmed
+            self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Paint flush to the widget boundary — no inset, so there is only one edge.
+        r = QRectF(self.rect())
+        radius = float(self.radius)
+
+        # ── Base fill ────────────────────────────────────────────────────────
+        # Alpha is driven purely by OPACITY so 100% = fully solid (255).
+        # The theme's rgb values set the colour; OPACITY owns the transparency.
+        bg = THEME["bg_dimmed"] if self._dimmed else THEME["bg"]
+        r_, g_, b_, _ = bg
+        dimmed_factor = 0.7 if self._dimmed else 1.0
+        p.setBrush(QColor(r_, g_, b_, int(255 * OPACITY * dimmed_factor)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, radius, radius)
+
+        # ── Glass highlight gradient (top ~45%) ───────────────────────────
+        hi = THEME["glass_hi"]
+        grad = QLinearGradient(QPointF(r.x(), r.y()),
+                               QPointF(r.x(), r.y() + r.height() * 0.45))
+        grad.setColorAt(0.0, QColor(hi[0], hi[1], hi[2], hi[3]))
+        grad.setColorAt(1.0, QColor(hi[0], hi[1], hi[2], 0))
+        p.setBrush(grad)
+        p.drawRoundedRect(r, radius, radius)
+
+        # ── Border ───────────────────────────────────────────────────────
+        bc = THEME["glass_border"]
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(*bc), 1.0))
+        p.drawRoundedRect(r, radius, radius)
+
+        p.end()
 
 
 # ── Hotkey capture widget ─────────────────────────────────────────────────────
@@ -222,18 +329,11 @@ class SettingsDialog(QDialog):
         self.setFixedWidth(260)
 
     def _build_ui(self):
+        T = THEME
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
-        card = QFrame()
-        card.setObjectName("card")
-        card.setStyleSheet("""
-            QFrame#card {
-                background: rgba(22, 22, 35, 250);
-                border-radius: 14px;
-                border: 1px solid rgba(255,255,255,40);
-            }
-        """)
+        card = GlassCard(radius=16)
         root.addWidget(card)
 
         layout = QVBoxLayout(card)
@@ -244,7 +344,7 @@ class SettingsDialog(QDialog):
         title_row = QHBoxLayout()
         title = QLabel("Settings")
         title.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: bold; "
+            f"color: {T['text_primary']}; font-size: 13px; font-weight: bold; "
             "background: transparent; border: none;"
         )
         title_row.addWidget(title)
@@ -253,7 +353,7 @@ class SettingsDialog(QDialog):
         close_btn.setFixedSize(22, 22)
         close_btn.setStyleSheet(f"""
             QPushButton {{
-                color: {TEXT_SECONDARY}; background: rgba(255,255,255,15);
+                color: {T['text_secondary']}; background: {T['close_btn_bg']};
                 border-radius: 11px; font-size: 15px; font-weight: bold; border: none;
             }}
             QPushButton:hover {{ background: rgba(220,60,60,200); color: white; }}
@@ -265,13 +365,13 @@ class SettingsDialog(QDialog):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background: {BORDER};")
+        sep.setStyleSheet(f"background: {T['border']};")
         layout.addWidget(sep)
 
         # ── Edge side ────────────────────────────────────────────────────
         side_lbl = QLabel("Snap to edge")
         side_lbl.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 10px; "
+            f"color: {T['text_secondary']}; font-size: 10px; "
             "background: transparent; border: none;"
         )
         layout.addWidget(side_lbl)
@@ -283,15 +383,15 @@ class SettingsDialog(QDialog):
             rb.setChecked(self.settings.get("side") == value)
             rb.setStyleSheet(f"""
                 QRadioButton {{
-                    color: {TEXT_PRIMARY}; font-size: 11px;
+                    color: {T['text_primary']}; font-size: 11px;
                     background: transparent; border: none; spacing: 8px;
                 }}
                 QRadioButton::indicator {{
                     width: 14px; height: 14px; border-radius: 7px;
-                    border: 2px solid rgba(255,255,255,80); background: transparent;
+                    border: 2px solid {T['border_hover']}; background: transparent;
                 }}
                 QRadioButton::indicator:checked {{
-                    background: {ACCENT}; border-color: {ACCENT};
+                    background: {T['accent']}; border-color: {T['accent']};
                 }}
             """)
             self._btn_group.addButton(rb)
@@ -300,13 +400,13 @@ class SettingsDialog(QDialog):
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setFixedHeight(1)
-        sep2.setStyleSheet(f"background: {BORDER};")
+        sep2.setStyleSheet(f"background: {T['border']};")
         layout.addWidget(sep2)
 
         # ── Global hotkey ─────────────────────────────────────────────────
         hotkey_lbl = QLabel("Toggle shortcut  (click to change)")
         hotkey_lbl.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 10px; "
+            f"color: {T['text_secondary']}; font-size: 10px; "
             "background: transparent; border: none;"
         )
         layout.addWidget(hotkey_lbl)
@@ -317,22 +417,22 @@ class SettingsDialog(QDialog):
         self._hotkey_capture.setFixedHeight(30)
         self._hotkey_capture.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(255,255,255,12);
-                color: {TEXT_PRIMARY};
-                border: 1px solid {BORDER};
+                background: {T['item_bg']};
+                color: {T['text_primary']};
+                border: 1px solid {T['border']};
                 border-radius: 6px;
                 font-size: 11px; font-weight: bold;
             }}
             QPushButton:hover {{
-                background: rgba(255,255,255,22);
-                border-color: {ACCENT};
+                background: {T['item_bg_hover']};
+                border-color: {T['accent']};
             }}
         """)
         layout.addWidget(self._hotkey_capture)
 
         show_time_lbl = QLabel("Show time after shortcut")
         show_time_lbl.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 10px; "
+            f"color: {T['text_secondary']}; font-size: 10px; "
             "background: transparent; border: none;"
         )
         layout.addWidget(show_time_lbl)
@@ -345,24 +445,98 @@ class SettingsDialog(QDialog):
         self._show_time_spin.setFixedHeight(30)
         self._show_time_spin.setStyleSheet(f"""
             QSpinBox {{
-                background: rgba(255,255,255,12);
-                color: {TEXT_PRIMARY};
-                border: 1px solid {BORDER};
+                background: {T['item_bg']};
+                color: {T['text_primary']};
+                border: 1px solid {T['border']};
                 border-radius: 6px;
                 font-size: 11px;
                 padding: 0 8px;
             }}
             QSpinBox:hover {{
-                background: rgba(255,255,255,22);
-                border-color: {ACCENT};
+                background: {T['item_bg_hover']};
+                border-color: {T['accent']};
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
-                width: 18px;
-                border: none;
-                background: transparent;
+                width: 18px; border: none; background: transparent;
             }}
         """)
         layout.addWidget(self._show_time_spin)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setFixedHeight(1)
+        sep3.setStyleSheet(f"background: {T['border']};")
+        layout.addWidget(sep3)
+
+        # ── Dark mode ─────────────────────────────────────────────────────
+        dark_row = QHBoxLayout()
+        dark_lbl = QLabel("Dark mode")
+        dark_lbl.setStyleSheet(
+            f"color: {T['text_primary']}; font-size: 11px; "
+            "background: transparent; border: none;"
+        )
+        dark_row.addWidget(dark_lbl)
+        dark_row.addStretch()
+
+        self._dark_check = QCheckBox()
+        self._dark_check.setChecked(bool(self.settings.get("dark_mode", True)))
+        self._dark_check.setStyleSheet(f"""
+            QCheckBox::indicator {{
+                width: 18px; height: 18px; border-radius: 5px;
+                border: 2px solid {T['border_hover']}; background: transparent;
+            }}
+            QCheckBox::indicator:checked {{
+                background: {T['accent']}; border-color: {T['accent']};
+            }}
+        """)
+        dark_row.addWidget(self._dark_check)
+        layout.addLayout(dark_row)
+
+        sep4 = QFrame()
+        sep4.setFrameShape(QFrame.Shape.HLine)
+        sep4.setFixedHeight(1)
+        sep4.setStyleSheet(f"background: {T['border']};")
+        layout.addWidget(sep4)
+
+        # ── Opacity ───────────────────────────────────────────────────────
+        opacity_row = QHBoxLayout()
+        opacity_lbl = QLabel("Opacity")
+        opacity_lbl.setStyleSheet(
+            f"color: {T['text_primary']}; font-size: 11px; "
+            "background: transparent; border: none;"
+        )
+        opacity_row.addWidget(opacity_lbl)
+        opacity_row.addStretch()
+        self._opacity_val_lbl = QLabel()
+        self._opacity_val_lbl.setStyleSheet(
+            f"color: {T['text_secondary']}; font-size: 10px; "
+            "background: transparent; border: none;"
+        )
+        opacity_row.addWidget(self._opacity_val_lbl)
+        layout.addLayout(opacity_row)
+
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(20, 100)
+        self._opacity_slider.setValue(int(self.settings.get("opacity", 90)))
+        self._opacity_slider.setFixedHeight(22)
+        self._opacity_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 4px; border-radius: 2px;
+                background: {T['border']};
+            }}
+            QSlider::handle:horizontal {{
+                width: 14px; height: 14px; border-radius: 7px;
+                background: {T['accent']}; margin: -5px 0;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {T['accent']}; border-radius: 2px;
+            }}
+        """)
+        self._opacity_slider.valueChanged.connect(
+            lambda v: self._opacity_val_lbl.setText(f"{v}%")
+        )
+        self._opacity_val_lbl.setText(f"{self._opacity_slider.value()}%")
+        layout.addWidget(self._opacity_slider)
 
         layout.addSpacing(4)
 
@@ -371,11 +545,11 @@ class SettingsDialog(QDialog):
         save_btn.setFixedHeight(32)
         save_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {ACCENT}; color: white;
+                background: {T['accent']}; color: white;
                 border: none; border-radius: 8px;
                 font-size: 11px; font-weight: bold;
             }}
-            QPushButton:hover {{ background: #4a8ce0; }}
+            QPushButton:hover {{ background: {T['accent_hover']}; }}
         """)
         save_btn.clicked.connect(self._save)
         layout.addWidget(save_btn)
@@ -387,7 +561,19 @@ class SettingsDialog(QDialog):
                 break
         self.settings["hotkey"] = self._hotkey_capture.hotkey
         self.settings["show_time"] = self._show_time_spin.value()
+        self.settings["dark_mode"] = self._dark_check.isChecked()
+        self.settings["opacity"] = self._opacity_slider.value()
         self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        try:
+            hwnd = int(self.winId())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 33, ctypes.byref(ctypes.c_int(1)), 4
+            )
+        except Exception:
+            pass
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -444,31 +630,34 @@ class ShelfItem(QFrame):
         name = Path(self.file_path).name
         name_label = QLabel()
         name_label.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 11px; "
+            f"color: {THEME['text_primary']}; font-size: 11px; "
             "background: transparent; border: none;"
         )
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setToolTip(self.file_path)
         fm = name_label.fontMetrics()
         name_label.setText(fm.elidedText(name, Qt.TextElideMode.ElideMiddle, 55))
+        self._name_label = name_label
         layout.addWidget(name_label, 1)
 
-        # Overlay × button at the top-right corner of the card
         btn = QPushButton("×", self)
         btn.setFixedSize(16, 16)
-        btn.setStyleSheet("""
-            QPushButton {
-                color: rgba(255,255,255,140); background: rgba(30,30,50,210);
-                border-radius: 8px; font-size: 13px; font-weight: bold;
-                border: 1px solid rgba(255,255,255,35);
-                padding: 0px 0px 3px 0px; margin: 0px; text-align: center;
-            }
-            QPushButton:hover { background: rgba(220,60,60,220); color: white;
-                border-color: rgba(220,60,60,220); }
-        """)
         btn.clicked.connect(self._request_remove)
         self._remove_btn = btn
+        self._style_remove_btn()
         btn.raise_()
+
+    def _style_remove_btn(self):
+        self._remove_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {THEME['text_secondary']}; background: {THEME['item_bg']};
+                border-radius: 8px; font-size: 13px; font-weight: bold;
+                border: 1px solid {THEME['border']};
+                padding: 0px 0px 3px 0px; margin: 0px; text-align: center;
+            }}
+            QPushButton:hover {{ background: rgba(220,60,60,220); color: white;
+                border-color: rgba(220,60,60,220); }}
+        """)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -477,15 +666,25 @@ class ShelfItem(QFrame):
             btn.move(self.width() - 12 - btn.width(), 3)
 
     def _set_style(self, hovered: bool):
+        T = THEME
         if self.selected:
-            bg = "rgba(91,156,246,70)" if not hovered else "rgba(91,156,246,100)"
-            border = "border: 1px solid rgba(91,156,246,180);"
+            bg = T["item_sel_hover"] if hovered else T["item_sel"]
+            border = f"border: 1px solid {T['item_sel_border']};"
         else:
-            bg = ITEM_BG_HOVER if hovered else ITEM_BG
+            bg = T["item_bg_hover"] if hovered else T["item_bg"]
             border = ""
-        self.setStyleSheet(f"""
-            QFrame {{ background-color: {bg}; border-radius: 10px; margin: 1px 6px; {border} }}
-        """)
+        self.setStyleSheet(
+            f"QFrame {{ background-color: {bg}; border-radius: {ITEM_RADIUS}px; "
+            f"margin: 1px 6px; {border} }}"
+        )
+
+    def refresh_theme(self):
+        self._set_style(False)
+        self._name_label.setStyleSheet(
+            f"color: {THEME['text_primary']}; font-size: 11px; "
+            "background: transparent; border: none;"
+        )
+        self._style_remove_btn()
 
     def enterEvent(self, e):
         self._set_style(True)
@@ -521,7 +720,6 @@ class ShelfItem(QFrame):
                 self._drag_start is not None and
                 (e.pos() - self._drag_start).manhattanLength() > 8):
             shelf = self._get_shelf()
-            # Determine which files to drag
             if shelf and self in shelf._selected and len(shelf._selected) > 1:
                 drag_items = list(shelf._selected)
             else:
@@ -532,7 +730,6 @@ class ShelfItem(QFrame):
             mime.setUrls([QUrl.fromLocalFile(i.file_path) for i in drag_items])
             drag.setMimeData(mime)
 
-            # Build drag pixmap
             provider = QFileIconProvider()
             icon = provider.icon(QFileInfo(self.file_path))
             if len(drag_items) == 1:
@@ -572,24 +769,30 @@ class DropHint(QLabel):
         self.setText("Drop files here\nor press Ctrl+V")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumHeight(100)
+        self._active = False
         self._set_style(active=False)
 
     def _set_style(self, active: bool):
+        T = THEME
         if active:
-            self.setStyleSheet(f"""
-                color: {ACCENT}; font-size: 12px;
-                border: 2px dashed {ACCENT}; border-radius: 12px;
-                margin: 14px 10px; background: rgba(91,156,246,15);
-            """)
+            self.setStyleSheet(
+                f"color: {T['accent']}; font-size: 12px; "
+                f"border: 2px dashed {T['accent']}; border-radius: 12px; "
+                f"margin: 14px 10px; background: rgba(91,156,246,15);"
+            )
         else:
-            self.setStyleSheet(f"""
-                color: {TEXT_SECONDARY}; font-size: 12px;
-                border: 2px dashed rgba(255,255,255,40); border-radius: 12px;
-                margin: 14px 10px; background: transparent;
-            """)
+            self.setStyleSheet(
+                f"color: {T['text_secondary']}; font-size: 12px; "
+                f"border: 2px dashed {T['drop_hint_border']}; border-radius: 12px; "
+                f"margin: 14px 10px; background: transparent;"
+            )
 
     def set_active(self, v: bool):
+        self._active = v
         self._set_style(v)
+
+    def refresh_theme(self):
+        self._set_style(self._active)
 
 
 # ── Global hotkey event filter ────────────────────────────────────────────────
@@ -618,6 +821,7 @@ class ShelfWindow(QWidget):
         self._is_shown = False
         self._anim = None
         self._settings = load_settings()
+        set_theme(self._settings.get("dark_mode", True), self._settings.get("opacity", 90) / 100)
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._slide_out)
@@ -702,7 +906,7 @@ class ShelfWindow(QWidget):
         end   = QPoint(shelf_x(side, screen), y)
         self.move(start)
         self.show()
-        self._set_card_style(dimmed=False)
+        self._card.set_dimmed(False)
         anim = QPropertyAnimation(self, b"pos")
         anim.setDuration(180)
         anim.setStartValue(start)
@@ -727,11 +931,12 @@ class ShelfWindow(QWidget):
 
     # ── UI ────────────────────────────────────────────────────────────────
     def _build_ui(self):
+        T = THEME
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
-        self._card = QFrame(self)
-        self._card.setObjectName("card")
+        self._card = GlassCard(radius=CARD_RADIUS, parent=self)
+        self._card.set_dimmed(True)
         root.addWidget(self._card)
 
         card_layout = QVBoxLayout(self._card)
@@ -743,7 +948,7 @@ class ShelfWindow(QWidget):
 
         self._count_lbl = QLabel("")
         self._count_lbl.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 10px; "
+            f"color: {T['text_secondary']}; font-size: 10px; "
             "background: transparent; border: none;"
         )
         header.addWidget(self._count_lbl)
@@ -752,58 +957,39 @@ class ShelfWindow(QWidget):
         self._side_switch.setFixedSize(34, 20)
         self._side_switch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._side_switch.setToolTip("Switch shelf side")
-        self._side_switch.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-            }
-        """)
+        self._side_switch.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0px; }"
+        )
         self._side_switch.clicked.connect(self._toggle_side)
         header.addWidget(self._side_switch)
 
         header.addStretch()
 
-        gear_btn = QPushButton("⚙")
-        gear_btn.setFixedSize(20, 20)
-        gear_btn.setStyleSheet(f"""
-            QPushButton {{ color: {TEXT_SECONDARY}; background: transparent;
-                border: none; font-size: 13px; }}
-            QPushButton:hover {{ color: {TEXT_PRIMARY}; }}
-        """)
-        gear_btn.clicked.connect(self._open_settings)
-        header.addWidget(gear_btn)
+        self._gear_btn = QPushButton("⚙")
+        self._gear_btn.setFixedSize(20, 20)
+        self._gear_btn.clicked.connect(self._open_settings)
+        header.addWidget(self._gear_btn)
 
-        clear_btn = QPushButton("✕")
-        clear_btn.setFixedSize(20, 20)
-        clear_btn.setStyleSheet(f"""
-            QPushButton {{ color: {TEXT_SECONDARY}; background: transparent;
-                border: none; font-size: 11px; }}
-            QPushButton:hover {{ color: rgba(220,80,80,230); }}
-        """)
-        clear_btn.clicked.connect(self.clear_all)
-        header.addWidget(clear_btn)
+        self._clear_btn = QPushButton("✕")
+        self._clear_btn.setFixedSize(20, 20)
+        self._clear_btn.clicked.connect(self.clear_all)
+        header.addWidget(self._clear_btn)
+
+        self._style_header_btns()
         card_layout.addLayout(header)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background: {BORDER}; margin: 0 8px;")
-        card_layout.addWidget(sep)
+        self._sep = QFrame()
+        self._sep.setFrameShape(QFrame.Shape.HLine)
+        self._sep.setFixedHeight(1)
+        self._sep.setStyleSheet(f"background: {T['border']}; margin: 0 8px;")
+        card_layout.addWidget(self._sep)
         card_layout.addSpacing(4)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet("""
-            QScrollArea { background: transparent; border: none; }
-            QScrollBar:vertical { background: rgba(255,255,255,8); width: 4px;
-                margin: 4px 2px; border-radius: 2px; }
-            QScrollBar::handle:vertical { background: rgba(255,255,255,55);
-                border-radius: 2px; min-height: 20px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-        """)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._style_scroll()
 
         self._items_widget = QWidget()
         self._items_widget.setStyleSheet("background: transparent;")
@@ -815,27 +1001,62 @@ class ShelfWindow(QWidget):
         self._drop_hint = DropHint()
         self._items_layout.addWidget(self._drop_hint)
 
-        scroll.setWidget(self._items_widget)
-        card_layout.addWidget(scroll)
+        self._scroll.setWidget(self._items_widget)
+        card_layout.addWidget(self._scroll)
 
-        foot = QLabel("Drag files in  •  Ctrl+V to paste")
-        foot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        foot.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 9px; "
+        self._foot = QLabel("Drag files in  •  Ctrl+V to paste")
+        self._foot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._foot.setStyleSheet(
+            f"color: {T['text_secondary']}; font-size: 9px; "
             "background: transparent; border: none; padding: 4px;"
         )
-        card_layout.addWidget(foot)
+        card_layout.addWidget(self._foot)
 
-        self._set_card_style(dimmed=True)
         self._refresh_side_switch()
 
-    def _set_card_style(self, dimmed: bool):
-        bg = "rgba(18,18,28,160)" if dimmed else BG_HOVER_COLOR
-        border = BORDER if dimmed else BORDER_HOVER
-        self._card.setStyleSheet(f"""
-            QFrame#card {{ background-color: {bg}; border-radius: 16px;
-                border: 1px solid {border}; }}
+    def _style_header_btns(self):
+        T = THEME
+        self._gear_btn.setStyleSheet(
+            f"QPushButton {{ color: {T['text_secondary']}; background: transparent; "
+            f"border: none; font-size: 13px; }}"
+            f"QPushButton:hover {{ color: {T['text_primary']}; }}"
+        )
+        self._clear_btn.setStyleSheet(
+            f"QPushButton {{ color: {T['text_secondary']}; background: transparent; "
+            f"border: none; font-size: 11px; }}"
+            f"QPushButton:hover {{ color: rgba(220,80,80,230); }}"
+        )
+        self._count_lbl.setStyleSheet(
+            f"color: {T['text_secondary']}; font-size: 10px; "
+            "background: transparent; border: none;"
+        )
+
+    def _style_scroll(self):
+        T = THEME
+        self._scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: {T['scrollbar']}; width: 4px;
+                margin: 4px 2px; border-radius: 2px; }}
+            QScrollBar::handle:vertical {{ background: {T['scrollbar_handle']};
+                border-radius: 2px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
         """)
+
+    # ── Theme ─────────────────────────────────────────────────────────────
+    def _apply_theme(self):
+        set_theme(self._settings.get("dark_mode", True), self._settings.get("opacity", 90) / 100)
+        T = THEME
+        self._card.update()
+        self._style_header_btns()
+        self._sep.setStyleSheet(f"background: {T['border']}; margin: 0 8px;")
+        self._style_scroll()
+        self._foot.setStyleSheet(
+            f"color: {T['text_secondary']}; font-size: 9px; "
+            "background: transparent; border: none; padding: 4px;"
+        )
+        self._drop_hint.refresh_theme()
+        for item in self.items:
+            item.refresh_theme()
 
     # ── Settings ──────────────────────────────────────────────────────────
     def _refresh_side_switch(self):
@@ -870,6 +1091,7 @@ class ShelfWindow(QWidget):
             self._position_on_screen()
             self._register_hotkey()
             self._refresh_side_switch()
+            self._apply_theme()
 
     # ── Tray ──────────────────────────────────────────────────────────────
     def _setup_tray(self):
@@ -1030,6 +1252,19 @@ class ShelfWindow(QWidget):
     def _update_count(self):
         n = len(self.items)
         self._count_lbl.setText(f"{n} item{'s' if n != 1 else ''}" if n else "")
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # Re-apply every show: Windows may reset DWM corner preference across
+        # hide/show cycles. Safe here — window is visible so winId() is valid.
+        try:
+            hwnd = int(self.winId())
+            # DWMWA_WINDOW_CORNER_PREFERENCE=33, DWMWCP_DONOTROUND=1
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 33, ctypes.byref(ctypes.c_int(1)), 4
+            )
+        except Exception:
+            pass
 
     def closeEvent(self, e):
         self._unregister_hotkey()

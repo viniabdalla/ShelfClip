@@ -1,5 +1,7 @@
 {
-  "side": "left",
+  "side": "right",
   "hotkey": "ctrl+y",
-  "show_time": 5
+  "show_time": 5,
+  "dark_mode": true,
+  "opacity": 100
 }
