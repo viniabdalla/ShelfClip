@@ -2,7 +2,7 @@
 #define MyAppVersion "1.6.1"
 #define MyAppPublisher "Vinicius"
 #define MyAppExeName "ShelfClip.exe"
-#define SourceDir "E:\OneDrive\CLAUDE CLI\YOINK WINDOWS\dist"
+#define SourceDir "C:\Users\vinic\OneDrive\CLAUDE CLI\YOINK WINDOWS\dist"
 
 [Setup]
 AppId={{A3F2C8D1-4B7E-4F9A-8C2D-1E5F3A6B9C0D}
@@ -13,7 +13,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=E:\OneDrive\CLAUDE CLI\YOINK WINDOWS\installer_output
+OutputDir=C:\Users\vinic\OneDrive\CLAUDE CLI\YOINK WINDOWS\installer_output
 OutputBaseFilename=ShelfClip_Setup
 Compression=lzma
 SolidCompression=yes
