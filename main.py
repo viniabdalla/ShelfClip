@@ -106,7 +106,7 @@ def set_theme(dark: bool, opacity: float = 0.9):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 def load_settings() -> dict:
-    defaults = {"side": "right", "hotkey": "ctrl+y", "show_time": 4, "dark_mode": True, "opacity": 90}
+    defaults = {"side": "right", "hotkey": "ctrl+y", "show_time": 4, "dark_mode": True, "opacity": 90, "monitor_mode": "single"}
     if SETTINGS_FILE.exists():
         try:
             data = json.loads(SETTINGS_FILE.read_text())
