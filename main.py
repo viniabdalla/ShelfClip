@@ -897,10 +897,11 @@ class ShelfWindow(QWidget):
                 self._collapse_timer.start(1200)
 
     # ── Slide animations ──────────────────────────────────────────────────
-    def _slide_in(self):
+    def _slide_in(self, screen: QScreen | None = None):
         self._is_shown = True
         side = self._settings["side"]
-        screen = get_edge_screen(side)
+        if screen is None:
+            screen = get_edge_screen(side)
         y = screen.availableGeometry().center().y() - self.height() // 2
         start = QPoint(offscreen_x(side, screen), y)
         end   = QPoint(shelf_x(side, screen), y)
@@ -915,10 +916,11 @@ class ShelfWindow(QWidget):
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         self._anim = anim
 
-    def _slide_out(self):
+    def _slide_out(self, screen: QScreen | None = None, on_complete=None):
         self._is_shown = False
         side = self._settings["side"]
-        screen = get_edge_screen(side)
+        if screen is None:
+            screen = get_edge_screen(side)
         y = self.pos().y()
         anim = QPropertyAnimation(self, b"pos")
         anim.setDuration(180)
@@ -926,6 +928,8 @@ class ShelfWindow(QWidget):
         anim.setEndValue(QPoint(offscreen_x(side, screen), y))
         anim.setEasingCurve(QEasingCurve.Type.InCubic)
         anim.finished.connect(self.hide)
+        if on_complete:
+            anim.finished.connect(on_complete)
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         self._anim = anim
 
