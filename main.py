@@ -1153,9 +1153,20 @@ class ShelfWindow(QWidget):
         self._collapse_timer.stop()
         self._is_shown = False
         self.hide()
-        self._position_on_screen()
-        self._refresh_side_switch()
-        self._slide_in()
+
+        if self._settings.get("monitor_mode", "single") == "single":
+            self._position_on_screen()
+            self._refresh_side_switch()
+            self._slide_in()
+        else:
+            side = self._settings["side"]
+            screen = (self._current_screen
+                      or QGuiApplication.screenAt(QCursor.pos())
+                      or get_edge_screen(side))
+            y = screen.availableGeometry().center().y() - self.height() // 2
+            self.move(offscreen_x(side, screen), y)
+            self._refresh_side_switch()
+            self._slide_in(screen=screen)
 
     def _open_settings(self):
         dlg = SettingsDialog(self._settings, self)
