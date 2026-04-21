@@ -112,7 +112,7 @@ Single-monitor path is unchanged inside an `if monitor_mode == "single":` guard.
 |---|---|---|
 | Drag near configured edge | Shelf appears | Shelf appears on cursor's monitor |
 | Drag to different monitor | Nothing | Shelf follows after 400ms |
-| Hotkey toggle | Works as before | Works as before (shows on _current_screen or last known) |
+| Hotkey toggle | Works as before | Shows on `_current_screen` if set; falls back to cursor's current screen if shelf has never been shown yet |
 | Switch button | Flips edge on anchor screen | Flips edge on current monitor |
 | No drag, shelf empty | Auto-hides after 1.2s | Auto-hides after 1.2s |
 | Shelf has items | Never auto-hides | Never auto-hides |
