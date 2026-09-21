@@ -1,8 +1,4 @@
 __pycache__/
 *.pyc
-build/
-dist/
-installer_output/
-error.log
-IMAGENS/
 *.bak
+run.log

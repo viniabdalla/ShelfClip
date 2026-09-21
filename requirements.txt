@@ -1,1 +1,3 @@
-PyQt6>=6.4.0
+# System packages (Arch / Omarchy), no pip install needed:
+#   pacman -S python-gobject gtk4 gtk4-layer-shell wl-clipboard
+# Run: ./shelfclip   (needs a Wayland compositor with layer-shell, e.g. Hyprland)

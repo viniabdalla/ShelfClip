@@ -1,0 +1,4 @@
+#!/bin/sh
+# ShelfClip launcher. Starts the shelf, or talks to the running one:
+#   shelfclip [toggle|paste|clear|reload-theme|quit]
+exec python3 "$(dirname "$(readlink -f "$0")")/main.py" "$@"

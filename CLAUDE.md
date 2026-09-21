@@ -4,106 +4,64 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository
 
-ShelfClip — a Yoink-inspired floating file shelf for Windows. Frosted-glass, always-on-top panel that auto-hides off-screen and appears only when dragging a file near the configured edge, or via a global hotkey.
+ShelfClip — a minimal Yoink-style file shelf for Omarchy (Hyprland / Wayland). A collapsed edge strip on the right of each monitor opens into a panel in the top-right corner (under the bar) when a file is dragged onto it or `shelfclip toggle` runs; the panel grows downward as tiles are added.
 
-**Stack:** Python 3.11 + PyQt6
+**Stack:** Python 3 + GTK4 (PyGObject) + gtk4-layer-shell. Single file: `main.py`. The old Windows/PyQt6 app lives on the `windows-pyqt6` branch (and `main`).
 
-## Running & Building
+## Running
 
 ```bash
-# Run (development) — use CMD or PowerShell, not git bash
-python main.py
-
-# Build .exe — run from CMD or double-click
-build.bat
-# Output: dist/ShelfClip.exe
-
-# Build installer (requires Inno Setup 6) — run after build.bat
-build_installer.bat
-# Output: installer_output/ShelfClip_Setup.exe
+./shelfclip                  # start (or `python main.py`)
+./shelfclip toggle|paste|clear|reload-theme|quit   # control the running instance
 ```
 
-**OneDrive build issue:** If `build.bat` throws a `PermissionError` on `build\ShelfClip\localpycs`, manually delete the `build/` folder in Explorer before retrying. OneDrive locks it between builds.
+Deps are system packages (`python-gobject gtk4 gtk4-layer-shell wl-clipboard`), already on Omarchy. There are no automated tests; verify by running it. Useful checks:
 
-**`installer.iss` paths:** `SourceDir` and `OutputDir` are hardcoded absolute paths. If the OneDrive drive letter changes, update both lines in `installer.iss`.
+```bash
+hyprctl layers -j     # find namespace "shelfclip": x/y/w/h per monitor
+grim -o DP-1 out.png  # screenshot a monitor
+wl-copy --type text/uri-list <<< "file:///path/a"; ./shelfclip paste   # stage files without dragging
+```
 
-Python is at `C:\Users\vinic\AppData\Local\Programs\Python\Python311\python.exe` — `python` may not resolve in git bash; use CMD or PowerShell.
-
-There are no automated tests. Verification is always manual by running the app.
+Real drag-and-drop can't be automated here; test it by hand.
 
 ## Architecture (`main.py`)
 
-Single-file app. Key classes:
-
 | Symbol | Role |
 |---|---|
-| `ShelfWindow` | Main window — frameless, always-on-top, translucent. Owns item list, handles drop/paste/keyboard. Polls cursor every 80ms via `_poll_cursor()`. |
-| `GlassCard` | Custom `QWidget` subclass used as the shelf panel and settings dialog panel. All background painting is done in `paintEvent` (no CSS background). Draws frosted-glass look: base fill + gradient highlight + border. |
-| `ShelfItem` | One card per staged file — icon/thumbnail, filename, overlay × button. Supports Ctrl/Shift multi-select. Initiates `QDrag`; drags all selected items if self is selected. Auto-removes after successful external drop. |
-| `HotkeyFilter` | `QAbstractNativeEventFilter` catching `WM_HOTKEY` (0x0312) from the thread queue, calls `ShelfWindow._toggle_shelf()`. |
-| `SettingsDialog` | Frameless `QDialog` built on `GlassCard`. Edge, hotkey, show-time, dark mode, opacity, and monitor mode settings. |
-| `HotkeyCapture` | `QPushButton` subclass that grabs the keyboard and records the next key combo pressed. |
-| `DropHint` | Placeholder label shown when shelf is empty; highlights on drag-enter. |
+| `Shelf` | Shared model: `paths`, `selected`, `last_clicked`, plus `on_items` / `on_selection` callback lists. `click()` holds the Ctrl/Shift selection logic. |
+| `Tile` (`Gtk.Overlay`) | One staged file: thumbnail/icon, name, hover-only × button. Owns the `GestureClick` (selection) and `DragSource` (drag-out, single or whole selection). |
+| `ShelfWindow` | One layer-shell window per monitor: `Gtk.Revealer(panel)` + a transparent edge `strip`. Owns the `DropTarget`, key handling and sizing (`_fit`). |
+| `ShelfApp` | `Gtk.Application` (`HANDLES_COMMAND_LINE`, single instance via D-Bus). Decides which window is open (`open_on`, `close_all`, `toggle`), thumbnails, `wl-paste` clipboard, theme reload. |
+| `load_palette` / `build_css` | Read the active Omarchy theme's `colors.toml`, generate the CSS. |
 
-**Key helpers:**
-- `get_edge_screen(side)` — returns the `QScreen` at the far left/right of all monitors (used by Single Monitor mode only).
-- `shelf_x / offscreen_x / near_edge / is_dragging` — position math and input state.
-- `set_theme(dark, opacity)` — updates globals `THEME` (dict) and `OPACITY` (float). Called on startup and after settings save.
+Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `main.py`).
 
-## Settings (`settings.json`)
+## Behavior
 
-```json
-{
-  "side": "right",
-  "hotkey": "ctrl+y",
-  "show_time": 4,
-  "dark_mode": true,
-  "opacity": 90,
-  "monitor_mode": "single"
-}
-```
+- Empty shelf: collapsed to an `trigger_width`-wide strip on the screen edge. Drag enters the strip → panel opens. Empty + pointer/drag left → closes after `COLLAPSE_MS`. `toggle` on an empty shelf auto-closes after `show_time`.
+- Shelf with files: stays open; `toggle` still closes/opens it manually. Adding a file re-opens it on the focused monitor.
+- Only the "active" monitor's window is expanded; the others stay collapsed. Panel height is capped to the monitor minus the bar; the tile list scrolls beyond that.
+- Drop target accepts `COPY | MOVE`. Nautilus here offers **only MOVE** (`Gdk.Drop.get_actions()` == 2), so a COPY-only target silently rejects every drag. Accepting MOVE is safe for file drags: we only store the path, and the file manager doesn't delete the original (verified). `_on_drag_enter` returns COPY when offered, otherwise MOVE.
+- Drag-out offers a single action, chosen in `Tile._on_prepare`: `cfg["drag_action"]` (default `move`), flipped when Ctrl is held at drag start. **Hyprland doesn't support modifier-based DnD action selection** (Ctrl=copy / Shift=move never reach the target; upstream limitation, seen on 0.51 and here on 0.56), so the offer itself has to decide. Ctrl at drag start is safe because a Ctrl+press no longer toggles the selection immediately: `_defer_toggle` applies it on release, and only if no drag started (otherwise it would unselect the tile being dragged out of a multi-selection).
+- Drag-out removes the tile only if the drop finished (`dnd-finished`). The decision is deferred with `GLib.idle_add` because `dnd-finished` and `drag-end` can arrive in either order. Dropping a tile back on the shelf is rejected (`app.internal_drag`, `app.keep_after_drop`). **Hyprland reports `dnd-finished` even when nobody accepted the drop** (bare desktop, bar) and the source never learns the negotiated action, so `cursor_over_window()` (hyprctl cursorpos + clients on the visible workspaces, checked at `drop-performed`) decides whether the drop landed on a window; if not, the tile stays. A window that rejects the drop (e.g. a terminal that ignores files) still unstages the tile, since there is no signal for that.
+- **Opening on drag uses `Gtk.DropControllerMotion` (`_on_drag_peek`), not `DropTarget.enter`.** The compositor does deliver drags to the edge strip, but a sweep across it lasts a few ms and `DropTarget` only emits `enter` after the drop's actions arrive, so it never fired. The raw `enter` (filtered to drags carrying `Gdk.FileList`) opens the panel immediately; `DropTarget` still handles the actual drop.
+- Pressing an already-selected tile in a multi-selection keeps the selection (so the group can be dragged) and collapses it on release if no drag started.
+- Clipboard uses `wl-paste`, not the GTK clipboard, so `shelfclip paste` works without keyboard focus. Images/text are saved under `$XDG_RUNTIME_DIR/shelfclip/`.
 
-`opacity` is stored as an integer 20–100; `set_theme()` receives it divided by 100.
+## Wayland / layer-shell gotchas
 
-## Theme System
+- **`LD_PRELOAD` is required.** gtk4-layer-shell must load before libwayland-client. `_ensure_layer_shell_preload()` re-execs once. Strip `LD_PRELOAD` from child processes (`CLEAN_ENV`).
+- **Layer surfaces don't shrink on their own.** `ShelfWindow._fit()` sets the default size explicitly: strip size when collapsed, panel natural size when open. Shrinking waits for the revealer's `child-revealed` so the slide-out isn't cut off.
+- **Never make the strip fully transparent.** Hyprland reports/keeps a stale 200x200 geometry for a surface whose buffer is entirely alpha 0. `.strip` uses `rgba(0,0,0,0.01)`.
+- Tile width must not depend on content: `Gtk.Label` uses `max_width_chars=1` (ellipsize instead of widening), thumbnails are square-cropped `Gtk.Image` with fixed `pixel_size` (a `Gtk.Picture` reports its intrinsic size and widens the tile).
+- `exclusive_zone = 0` makes the compositor place the panel below the bar automatically; the right margin is 0 so the strip touches the true screen edge (a margin would leave a dead pixel band that can't receive drags).
+- `Gdk.Texture.new_for_pixbuf` is deprecated; thumbnails use `Gdk.MemoryTexture`.
 
-Two theme dicts `_DARK` / `_LIGHT` at the top of `main.py`. The global `THEME` dict and `OPACITY` float are updated by `set_theme(dark, opacity)`. All widgets read from `THEME` at style-set time. `ShelfWindow._apply_theme()` propagates a theme change to all live widgets without losing shelf contents.
+## Theme
 
-`GlassCard.paintEvent` uses `THEME["bg"]` RGB + `OPACITY` for the alpha — at `OPACITY=1.0` the card is fully solid (alpha=255). The dimmed state (shelf hidden/idle) multiplies by 0.7.
-
-## Monitor Modes
-
-Two modes controlled by `settings["monitor_mode"]`:
-
-- **`"single"`** (default) — shelf is anchored to one fixed screen edge. `_poll_cursor()` uses `get_edge_screen(side)`.
-- **`"multi"`** — shelf tracks the cursor's current screen. `_poll_cursor()` delegates to `_poll_cursor_multi()`, which silently updates `_current_screen: QScreen | None` as the cursor moves between monitors. The shelf only appears when dragging near the configured edge of the current screen (same trigger as single mode). When the cursor moves to a new monitor, `_monitor_switch_timer` (400ms debounce) fires `_on_monitor_switch()`, which slides the shelf to the new screen only if it is currently visible.
-
-The two code paths are split by a top-level `if/else` in `_poll_cursor` and `_toggle_side` — the single-monitor branch is preserved verbatim.
-
-## Key Behaviors
-
-- Shelf appears when `is_dragging()` (left mouse button held via `GetAsyncKeyState(0x01)`) AND cursor within 4px of the configured edge — or via hotkey.
-- `RegisterHotKey` uses `hwnd=None` so `WM_HOTKEY` posts to the thread queue. **Do not use `winId()` for hotkey registration** — hard crash on hidden translucent windows.
-- `_slide_in(screen=None)` and `_slide_out(screen=None, on_complete=None)` accept an optional target screen; defaults to `get_edge_screen(side)` when omitted.
-- When shelf has items it never auto-hides. Auto-hide (1.2s timer) only fires when empty.
-- Dropping back onto the shelf is a cancelled drag — `dropEvent` calls `e.ignore()` when all dropped URLs are already on shelf.
-- Multi-select: `_selected` list + `_last_clicked` for Shift range-select; all selected URLs bundled into one `QDrag` with a count badge.
-- Clipboard images saved as PNGs to `%TEMP%/shelfclip/`.
-
-## PyQt6 Gotchas
-
-- `QFileIconProvider` → `PyQt6.QtWidgets` (not `QtGui`)
-- `QAction`, `QScreen` → `PyQt6.QtGui`
-- `QAbstractNativeEventFilter` → `PyQt6.QtCore`
-- `event.globalPosition().toPoint()` for mouse global pos (not `globalPos()`)
-- `app.setQuitOnLastWindowClosed(False)` keeps app alive when window hides
-- `QPropertyAnimation.DeletionPolicy.DeleteWhenStopped` prevents dangling animation objects — but the Python wrapper (`self._anim`) remains non-None after the C++ object is deleted. Always wrap `.state()` or any method call on `self._anim` in `try/except RuntimeError`.
-- **Never call `winId()` on a hidden window with `WA_TranslucentBackground`** — immediate hard crash with no Python traceback
-- `WA_TranslucentBackground` must NOT be set on child widgets — only on top-level windows. Setting it on a child causes a ghost outer border.
-- Windows 11 DWM applies rounded corners to every window automatically. Disable with `DwmSetWindowAttribute(hwnd, 33, DWMWCP_DONOTROUND=1, 4)` in `showEvent` (window must be visible). Both `ShelfWindow` and `SettingsDialog` do this.
+`~/.local/state/omarchy/current/theme/colors.toml` (keys `bg fg accent muted selection lighter_bg red`, with fallbacks to `background/foreground/color*`). `omarchy-theme-set` replaces `current/theme` then rewrites `theme.name`; `ShelfApp` watches the `current/` directory and reloads the CSS after a 400ms debounce. Look matches the user's Hyprland: square corners, no blur, no shadow, 2px gaps.
 
 ## Planning Docs
 
-Design specs and implementation plans live in `docs/superpowers/`:
-- `specs/` — feature design documents
-- `plans/` — step-by-step implementation plans (checkbox format, used with subagent-driven development)
+`docs/superpowers/` holds design specs and plans from the Windows era (multi-monitor mode etc.). They describe the PyQt6 app and are kept for history.
