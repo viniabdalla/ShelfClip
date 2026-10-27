@@ -54,7 +54,7 @@ CONFIG_FILE = Path.home() / ".config/shelfclip/config.json"
 DEFAULTS = {
     "show_time": 5,         # seconds a hotkey-opened, empty shelf stays visible
     "tile_size": 120,       # px, tiles are square
-    "trigger_width": 24,    # px, drag hot-zone on the screen edge while collapsed
+    "trigger_width": 1,     # px, drag hot-zone on the screen edge while collapsed
     "margin": 2,            # px, gap under the bar and to the edge when open
     "drag_action": "move",  # what dragging a tile out does: "move" or "copy"; Ctrl at drag start flips it
 }

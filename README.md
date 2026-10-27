@@ -72,7 +72,7 @@ Optional `~/.config/shelfclip/config.json`; missing keys use the defaults:
 {
   "show_time": 5,
   "tile_size": 120,
-  "trigger_width": 24,
+  "trigger_width": 1,
   "margin": 2,
   "drag_action": "move"
 }
@@ -82,7 +82,7 @@ Optional `~/.config/shelfclip/config.json`; missing keys use the defaults:
 
 ## Notes
 
-- Wayland can't read the mouse button globally, so instead of polling for a drag the shelf keeps a thin drop target on the screen edge. It intercepts clicks on those few pixels while collapsed (24 px by default; lower `trigger_width` if that gets in the way).
+- Wayland can't read the mouse button globally, so instead of polling for a drag the shelf keeps a thin drop target on the screen edge. It intercepts clicks on those few pixels while collapsed (1 px by default; lower `trigger_width` if that gets in the way).
 - The shelf opens the moment a file drag touches the edge and stays open ~1.2 s after the pointer leaves, so a quick flick is enough. Between two side-by-side monitors the edge isn't a wall, so the outer edge of the rightmost monitor is the easiest target.
 - Hyprland ignores Ctrl/Shift during a drag (it doesn't implement modifier-based copy/move/link), so the choice is made when the drag starts, by what the shelf offers to the file manager.
 - Wayland has no global hotkeys for clients; the keybind is a Hyprland `bind` that runs `shelfclip toggle`.
