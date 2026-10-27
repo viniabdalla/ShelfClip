@@ -12,10 +12,12 @@ ShelfClip — a minimal Yoink-style file shelf for Omarchy (Hyprland / Wayland).
 
 ```bash
 ./shelfclip                  # start (or `python main.py`)
-./shelfclip toggle|paste|clear|reload-theme|quit   # control the running instance
+./shelfclip toggle|paste|clear|settings|reload-theme|quit   # control the running instance
+./install.sh                 # link ~/.local/bin/shelfclip, autostart, Ctrl+Y bind, restart (idempotent)
+python3 tests/test_share.py -v   # sharing tests (not `-m unittest`: main.py re-execs with LD_PRELOAD)
 ```
 
-Deps are system packages (`python-gobject gtk4 gtk4-layer-shell wl-clipboard`), already on Omarchy. There are no automated tests; verify by running it. Useful checks:
+Deps are system packages (`python-gobject gtk4 gtk4-layer-shell wl-clipboard`), already on Omarchy, plus `tailscale` for sharing. Only the sharing layer has automated tests (`tests/test_share.py`, loopback only); verify the UI by running it. Useful checks:
 
 ```bash
 hyprctl layers -j     # find namespace "shelfclip": x/y/w/h per monitor
@@ -29,13 +31,16 @@ Real drag-and-drop can't be automated here; test it by hand.
 
 | Symbol | Role |
 |---|---|
-| `Shelf` | Shared model: `paths`, `selected`, `last_clicked`, plus `on_items` / `on_selection` callback lists. `click()` holds the Ctrl/Shift selection logic. |
+| `Shelf` | Shared model: `paths`, `meta` (path → `{id, origin}`), `selected`, `last_clicked`, plus `on_items` / `on_selection` / `on_removed` callbacks and `on_local_add` / `on_local_remove`, which fire only for changes made on this machine (`remote=False`) so sharing never echoes. `click()` holds the Ctrl/Shift selection logic. |
 | `Tile` (`Gtk.Overlay`) | One staged file: thumbnail/icon, name, hover-only × button. Owns the `GestureClick` (selection) and `DragSource` (drag-out, single or whole selection). |
 | `ShelfWindow` | One layer-shell window per monitor: `Gtk.Revealer(panel)` + a transparent edge `strip`. Owns the `DropTarget`, key handling and sizing (`_fit`). |
+| `SettingsWindow` | Centered layer surface (no anchors, namespace `shelfclip-settings`, keyboard EXCLUSIVE): show time / tile size sliders, share switch, online peers. |
+| Wire protocol (`send_add`, `send_remove`, `ask_hello`, `ask_state`, `fetch`, `serve_conn`, `Listener`) | GTK-free. One request per TCP connection: JSON header line, then raw bytes (tar stream for dirs) until the sender shuts down its side. |
+| `Share` | Tailscale glue + protocol handler: listener on the Tailscale IPv4 port 47811 while `share` is on, peer lookup via `tailscale status --json` (same `UserID`, online), push on local add/remove, pull+offer on enable. Worker threads only; results go back through `GLib.idle_add`. |
 | `ShelfApp` | `Gtk.Application` (`HANDLES_COMMAND_LINE`, single instance via D-Bus). Decides which window is open (`open_on`, `close_all`, `toggle`), thumbnails, `wl-paste` clipboard, theme reload. |
 | `load_palette` / `build_css` | Read the active Omarchy theme's `colors.toml`, generate the CSS. |
 
-Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `main.py`).
+Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `main.py`); the settings window writes it through `save_config()` (merge, debounced 300 ms). `ShelfApp.set_option()` applies a key live; `tile_size` rebuilds the tiles (`ShelfWindow.apply_tile_size`, debounced 150 ms).
 
 ## Behavior
 
@@ -48,6 +53,15 @@ Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `mai
 - **Opening on drag uses `Gtk.DropControllerMotion` (`_on_drag_peek`), not `DropTarget.enter`.** The compositor does deliver drags to the edge strip, but a sweep across it lasts a few ms and `DropTarget` only emits `enter` after the drop's actions arrive, so it never fired. The raw `enter` (filtered to drags carrying `Gdk.FileList`) opens the panel immediately; `DropTarget` still handles the actual drop.
 - Pressing an already-selected tile in a multi-selection keeps the selection (so the group can be dragged) and collapses it on release if no drag started.
 - Clipboard uses `wl-paste`, not the GTK clipboard, so `shelfclip paste` works without keyboard focus. Images/text are saved under `$XDG_RUNTIME_DIR/shelfclip/`.
+- Header: count, `clear` (only with files) and the ⚙ gear (always). The empty shelf doesn't auto-collapse while the settings window is open.
+
+## Sharing (Tailscale)
+
+- Spec: `docs/superpowers/specs/2026-10-27-settings-and-tailscale-share-design.md`. No polling, no heartbeat: the only background thing is the blocking `accept()` of the listener. Peers are looked up when something must be sent (add/remove/clear, startup with `share`, switch on, settings open, `toggle` retries the listener if Tailscale wasn't up).
+- Items are identified by `meta[path]["id"]` (uuid hex), the same on every machine. Received files go to `$XDG_RUNTIME_DIR/shelfclip/shared/<id>/<name>` and are deleted 60 s after leaving the shelf (a COPY drop may still be reading). Local originals are never touched.
+- `origin` is `None` for items staged here; `Share._wire()` fills in the Tailscale hostname only when the item is sent (the hostname is known once Tailscale has answered). Tiles show an `origin` badge when it isn't this host.
+- `Listener` accepts only the machine's own IP and same-user peers (`Share._allow`, rechecked per connection). Receivers strip any path from a peer's file name and unpack tars with `filter="data"`.
+- Machines run this same code; deploy = push, then `git pull && ./install.sh` on each machine.
 
 ## Wayland / layer-shell gotchas
 
@@ -64,4 +78,4 @@ Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `mai
 
 ## Planning Docs
 
-`docs/superpowers/` holds design specs and plans from the Windows era (multi-monitor mode etc.). They describe the PyQt6 app and are kept for history.
+`docs/superpowers/` holds design specs and plans. Those dated before 2026-10 are from the Windows era (multi-monitor mode etc.), describe the PyQt6 app and are kept for history. `specs/2026-10-27-settings-and-tailscale-share-design.md` and its plan cover the settings window, `install.sh` and the shared shelf.

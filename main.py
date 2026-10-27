@@ -31,8 +31,12 @@ import mimetypes  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+import shutil  # noqa: E402
+import socket  # noqa: E402
+import tarfile  # noqa: E402
 import tomllib  # noqa: E402
 import tempfile  # noqa: E402
+import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import gi  # noqa: E402
@@ -57,7 +61,10 @@ DEFAULTS = {
     "trigger_width": 1,     # px, drag hot-zone on the screen edge while collapsed
     "margin": 2,            # px, gap under the bar and to the edge when open
     "drag_action": "move",  # what dragging a tile out does: "move" or "copy"; Ctrl at drag start flips it
+    "share": False,         # mirror the shelf with my other Tailscale machines that have it on
 }
+SHOW_TIME_RANGE = (1, 30, 1)      # settings sliders: min, max, step
+TILE_SIZE_RANGE = (64, 256, 8)
 
 # Children of ours (hyprctl, wl-paste) must not inherit the layer-shell preload.
 CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
@@ -72,7 +79,23 @@ def load_config() -> dict:
         pass
     if cfg["drag_action"] not in ("copy", "move"):
         cfg["drag_action"] = DEFAULTS["drag_action"]
+    # 0 would let the compositor pick the strip size (200px): 1px is the real minimum.
+    cfg["trigger_width"] = max(1, int(cfg["trigger_width"]))
     return cfg
+
+
+def save_config(changes: dict):
+    """Merge `changes` into the config file, keeping keys we don't know about."""
+    try:
+        data = json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        data = {}
+    data.update(changes)
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError:
+        pass
 
 
 def _hex_to_rgb(h: str):
@@ -124,6 +147,35 @@ window.shelf {{ background: transparent; font-family: monospace; }}
 }}
 .header button {{ color: {p['muted']}; font-size: 10px; }}
 .header button:hover {{ color: {p['red']}; }}
+.header button.gear {{ font-size: 12px; }}
+.header button.gear:hover, .header button.gear.active {{ color: {p['accent']}; }}
+.tile .origin {{
+    background: {p['accent']}; color: {p['bg']};
+    font-size: 8px; padding: 0 3px; margin: 2px;
+}}
+window.settings {{ background: transparent; font-family: monospace; }}
+.settings-box {{
+    background: {p['bg']}; border: 1px solid {p['accent']}; color: {p['fg']};
+    padding: 10px 12px; font-size: 11px;
+}}
+.settings-box .title {{ color: {p['muted']}; }}
+.settings-box .muted {{ color: {p['muted']}; font-size: 10px; }}
+.settings-box .value {{ color: {p['fg']}; }}
+.settings-box button.close {{
+    background: none; border: none; box-shadow: none; padding: 0 4px; min-height: 0;
+    min-width: 0; border-radius: 0; color: {p['muted']};
+}}
+.settings-box button.close:hover {{ color: {p['red']}; }}
+.settings-box scale trough {{ background: {p['raised']}; border-radius: 0; min-height: 3px; }}
+.settings-box scale highlight {{ background: {p['accent']}; border-radius: 0; }}
+.settings-box scale slider {{
+    background: {p['fg']}; border-radius: 0; min-width: 10px; min-height: 10px;
+    margin: -4px; box-shadow: none; border: none;
+}}
+.settings-box switch {{ border-radius: 0; background: {p['raised']}; border: none; }}
+.settings-box switch:checked {{ background: {p['accent']}; }}
+.settings-box switch slider {{ border-radius: 0; background: {p['fg']}; box-shadow: none; }}
+.settings-box separator {{ background: {p['line']}; min-height: 1px; }}
 .tile {{ background: {p['raised']}; border: 2px solid transparent; border-radius: 0; }}
 .tile:hover {{ border-color: {p['muted']}; }}
 .tile.selected {{ border-color: {p['accent']}; }}
@@ -183,8 +235,12 @@ def cursor_over_window() -> bool:
         return True                        # can't tell: behave as if it landed on a window
 
 
+def runtime_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / "shelfclip"
+
+
 def temp_path(prefix: str, ext: str) -> Path:
-    base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / "shelfclip"
+    base = runtime_dir()
     base.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path, n = base / f"{prefix}-{stamp}{ext}", 1
@@ -205,41 +261,250 @@ def uris_to_paths(text: str) -> list:
     return paths
 
 
+# ── Sharing: wire protocol ───────────────────────────────────────────────────
+# One request per TCP connection: a JSON header line, then (for files) raw bytes until the
+# sender shuts down its side. Directories travel as a tar stream. No GTK in this section.
+PORT = 47811
+PROTO = 1
+CONNECT_TIMEOUT = 1.0       # an offline or non-sharing peer must fail fast
+IO_TIMEOUT = 30.0
+
+
+def _connect(ip: str, port: int) -> socket.socket:
+    s = socket.create_connection((ip, port), timeout=CONNECT_TIMEOUT)
+    s.settimeout(IO_TIMEOUT)
+    return s
+
+
+def _send_header(f, obj: dict):
+    f.write((json.dumps({"v": PROTO, **obj}) + "\n").encode())
+    f.flush()
+
+
+def _read_header(f):
+    line = f.readline(65536)
+    return json.loads(line) if line else None
+
+
+def _write_body(f, path: str, is_dir: bool):
+    if is_dir:
+        with tarfile.open(fileobj=f, mode="w|") as tar:
+            tar.add(path, arcname=Path(path).name)
+    else:
+        with open(path, "rb") as src:
+            shutil.copyfileobj(src, f)
+    f.flush()
+
+
+def receive_body(f, dest_dir, name: str, is_dir: bool) -> str:
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    name = Path(name).name or "item"                # never trust a peer's path
+    if is_dir:
+        with tarfile.open(fileobj=f, mode="r|") as tar:
+            tar.extractall(dest, filter="data")
+    else:
+        with open(dest / name, "wb") as out:
+            shutil.copyfileobj(f, out)
+    if not (dest / name).exists():
+        raise OSError(f"peer sent nothing for {name}")
+    return str(dest / name)
+
+
+def _request(ip: str, port: int, header: dict, body=None):
+    """Send one request; `body` is (path, is_dir) streamed after a go-ahead. Returns
+    (reply header, socket file) with the socket still open, or (None, None)."""
+    try:
+        s = _connect(ip, port)
+        f = s.makefile("rwb")
+        _send_header(f, header)
+        reply = _read_header(f)
+        if body and reply and reply.get("ok"):
+            _write_body(f, *body)
+            s.shutdown(socket.SHUT_WR)
+            reply = _read_header(f)
+        return reply, (s, f)
+    except (OSError, ValueError):
+        return None, None
+
+
+def _close(conn):
+    if conn:
+        for c in reversed(conn):
+            try:
+                c.close()
+            except OSError:
+                pass
+
+
+def send_add(ip: str, port: int, item: dict, path: str) -> bool:
+    """Offer an item; the peer answers ok:false when it already has it (still a success)."""
+    reply, conn = _request(ip, port, {"op": "add", **item}, (path, item["dir"]))
+    _close(conn)
+    return reply is not None
+
+
+def send_remove(ip: str, port: int, ids: list, cleared: bool) -> bool:
+    reply, conn = _request(ip, port, {"op": "remove", "ids": ids, "cleared": cleared})
+    _close(conn)
+    return bool(reply and reply.get("ok"))
+
+
+def ask_hello(ip: str, port: int):
+    reply, conn = _request(ip, port, {"op": "hello"})
+    _close(conn)
+    return reply.get("host") if reply and reply.get("ok") else None
+
+
+def ask_state(ip: str, port: int):
+    reply, conn = _request(ip, port, {"op": "state"})
+    _close(conn)
+    return reply.get("items", []) if reply and reply.get("ok") else None
+
+
+def fetch(ip: str, port: int, item_id: str, dest_root):
+    """Download one item into dest_root/<id>/. Returns (item, local path) or None."""
+    reply, conn = _request(ip, port, {"op": "get", "id": item_id})
+    try:
+        if not reply or not reply.get("ok"):
+            return None
+        item = {k: reply[k] for k in ("id", "origin", "name", "dir")}
+        return item, receive_body(conn[1], Path(dest_root) / item_id, item["name"], item["dir"])
+    except (OSError, KeyError, tarfile.TarError):
+        return None
+    finally:
+        _close(conn)
+
+
+def serve_conn(conn: socket.socket, handler):
+    """Answer one request. `handler` provides hostname(), wants(id), dest_for(id),
+    on_add(item, path), on_remove(ids, cleared), items() and item(id) -> (item, path)."""
+    conn.settimeout(IO_TIMEOUT)
+    with conn, conn.makefile("rwb") as f:
+        try:
+            hdr = _read_header(f)
+            if not hdr or hdr.get("v") != PROTO:
+                return
+            op = hdr.get("op")
+            if op == "hello":
+                _send_header(f, {"ok": True, "host": handler.hostname()})
+            elif op == "add":
+                item = {k: hdr[k] for k in ("id", "origin", "name", "dir")}
+                if not handler.wants(item["id"]):
+                    _send_header(f, {"ok": False})
+                    return
+                _send_header(f, {"ok": True})
+                try:
+                    path = receive_body(f, handler.dest_for(item["id"]), item["name"], item["dir"])
+                except (OSError, tarfile.TarError):
+                    handler.abort(item["id"])
+                    raise
+                handler.on_add(item, path)
+                _send_header(f, {"ok": True})
+            elif op == "remove":
+                handler.on_remove(list(hdr.get("ids", [])), bool(hdr.get("cleared")))
+                _send_header(f, {"ok": True})
+            elif op == "state":
+                _send_header(f, {"ok": True, "items": handler.items()})
+            elif op == "get":
+                found = handler.item(hdr.get("id"))
+                if not found:
+                    _send_header(f, {"ok": False})
+                    return
+                item, path = found
+                _send_header(f, {"ok": True, **item})
+                _write_body(f, path, item["dir"])
+        except (OSError, ValueError, KeyError, tarfile.TarError):
+            pass
+
+
+class Listener:
+    """Blocking accept loop in a daemon thread: idle costs nothing, no polling."""
+
+    def __init__(self, ip: str, port: int, handler, allow):
+        self.handler, self.allow = handler, allow
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((ip, port))           # raises OSError if the IP isn't up
+        self.sock.listen(8)
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                conn, (ip, _port) = self.sock.accept()
+            except OSError:
+                return                      # stop() closed the socket
+            threading.Thread(target=self._serve, args=(conn, ip), daemon=True).start()
+
+    def _serve(self, conn, ip):
+        if self.allow(ip):
+            serve_conn(conn, self.handler)
+        else:
+            conn.close()
+
+    def stop(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)     # wakes the blocked accept()
+        except OSError:
+            pass
+        self.sock.close()
+
+
 # ── Model ────────────────────────────────────────────────────────────────────
 class Shelf:
-    """Staged paths and selection, shared by every monitor's window."""
+    """Staged paths and selection, shared by every monitor's window. Each item also has an
+    id (the same on every machine sharing the shelf) and the hostname it came from (None
+    when it was staged here)."""
 
     def __init__(self):
         self.paths: list = []
+        self.meta: dict = {}
         self.selected: list = []
         self.last_clicked = None
         self.on_items: list = []
         self.on_selection: list = []
+        # Fired only for changes made on this machine, so sharing never echoes a peer's change.
+        self.on_local_add: list = []        # cb(path)
+        self.on_local_remove: list = []     # cb(ids, cleared)
+        self.on_removed: list = []          # cb(paths), every removal
 
-    def _emit(self, callbacks):
+    def _emit(self, callbacks, *args):
         for cb in list(callbacks):
-            cb()
+            cb(*args)
 
-    def add(self, path: str) -> bool:
-        if path in self.paths or len(self.paths) >= MAX_ITEMS or not os.path.exists(path):
+    def path_for(self, item_id: str):
+        # list(): sharing threads call this while the GTK thread may be mutating meta
+        return next((p for p, m in list(self.meta.items()) if m["id"] == item_id), None)
+
+    def add(self, path: str, item_id=None, origin=None, remote=False) -> bool:
+        if (path in self.paths or len(self.paths) >= MAX_ITEMS or not os.path.exists(path)
+                or (item_id and self.path_for(item_id))):
             return False
         self.paths.append(path)
+        self.meta[path] = {"id": item_id or uuid.uuid4().hex, "origin": origin}
         self._emit(self.on_items)
+        if not remote:
+            self._emit(self.on_local_add, path)
         return True
 
-    def remove(self, paths):
+    def remove(self, paths, remote=False, cleared=False):
         gone = [p for p in paths if p in self.paths]
         if not gone:
             return
+        ids = [self.meta.pop(p)["id"] for p in gone]
         self.paths = [p for p in self.paths if p not in gone]
         self.selected = [p for p in self.selected if p not in gone]
         if self.last_clicked in gone:
             self.last_clicked = None
         self._emit(self.on_items)
         self._emit(self.on_selection)
+        self._emit(self.on_removed, gone)
+        if not remote:
+            self._emit(self.on_local_remove, ids, cleared)
 
-    def clear(self):
-        self.remove(list(self.paths))
+    def clear(self, remote=False):
+        self.remove(list(self.paths), remote=remote, cleared=True)
 
     def click(self, path: str, ctrl=False, shift=False):
         if ctrl:
@@ -289,6 +554,15 @@ class Tile(Gtk.Overlay):
                          halign=Gtk.Align.FILL, valign=Gtk.Align.END)
         name.add_css_class("name")
         self.add_overlay(name)
+
+        origin = win.app.shelf.meta.get(path, {}).get("origin")
+        if origin and origin != win.app.share.host:       # came from another machine
+            # An overlay never widens the tile, so the badge may ask for a real width.
+            badge = Gtk.Label(label=origin, halign=Gtk.Align.START, valign=Gtk.Align.START,
+                              max_width_chars=max(4, self.size // 9),
+                              ellipsize=Pango.EllipsizeMode.END)
+            badge.add_css_class("origin")
+            self.add_overlay(badge)
 
         rm = Gtk.Button(label="×", halign=Gtk.Align.END, valign=Gtk.Align.START,
                         focusable=False, focus_on_click=False)
@@ -445,10 +719,15 @@ class ShelfWindow(Gtk.ApplicationWindow):
         self.header = Gtk.Box(spacing=8)
         self.header.add_css_class("header")
         self.count = Gtk.Label(xalign=0, hexpand=True)
-        clear = Gtk.Button(label="clear", focusable=False, focus_on_click=False)
-        clear.connect("clicked", lambda _b: app.shelf.clear())
+        self.clear = Gtk.Button(label="clear", focusable=False, focus_on_click=False)
+        self.clear.connect("clicked", lambda _b: app.shelf.clear())
+        self.gear = Gtk.Button(label="⚙", focusable=False, focus_on_click=False,
+                               tooltip_text="settings")
+        self.gear.add_css_class("gear")
+        self.gear.connect("clicked", lambda _b: app.toggle_settings(self))
         self.header.append(self.count)
-        self.header.append(clear)
+        self.header.append(self.clear)
+        self.header.append(self.gear)
         self.panel.append(self.header)
 
         self.column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
@@ -548,6 +827,19 @@ class ShelfWindow(Gtk.ApplicationWindow):
         chrome = 2 * self.app.cfg["margin"] + 2 + 24          # margins, border, header
         self.scroller.set_max_content_height(max(geo.height - top - chrome - 8, 100))
 
+    def apply_tile_size(self):
+        """Rebuild the tiles at the new `tile_size` (they size themselves at creation)."""
+        cfg = self.app.cfg
+        size = cfg["tile_size"]
+        for tile in self.tiles.values():
+            self.column.remove(tile)
+        self.tiles.clear()
+        self.hint.set_size_request(size, size)
+        self.strip.set_size_request(cfg["margin"] if self.is_open else cfg["trigger_width"],
+                                    -1 if self.is_open else size + 16)
+        self.sync_items()
+        self._fit()
+
     # ── model → view ─────────────────────────────────────────────────────
     def sync_items(self):
         shelf = self.app.shelf
@@ -559,8 +851,8 @@ class ShelfWindow(Gtk.ApplicationWindow):
                 self.tiles[path] = tile
                 self.column.append(tile)
         n = len(shelf.paths)
-        self.count.set_text(f"{n} item{'s' if n != 1 else ''}")
-        self.header.set_visible(n > 0)
+        self.count.set_text(f"{n} item{'s' if n != 1 else ''}" if n else "")
+        self.clear.set_visible(n > 0)           # the gear stays, even on an empty shelf
         self.scroller.set_visible(n > 0)
         self.hint.set_visible(n == 0)
         self.sync_selection()
@@ -630,9 +922,317 @@ class ShelfWindow(Gtk.ApplicationWindow):
         return True
 
 
+# ── Settings window ──────────────────────────────────────────────────────────
+class SettingsWindow(Gtk.Window):
+    """Small floating window in the center of a monitor: a layer surface with no anchors,
+    so it lands centered without any Hyprland window rule."""
+
+    def __init__(self, app, monitor):
+        super().__init__(application=app, title="ShelfClip settings")
+        self.app = app
+        cfg = app.cfg
+        self.add_css_class("settings")
+        LS.init_for_window(self)
+        LS.set_namespace(self, "shelfclip-settings")
+        LS.set_layer(self, LS.Layer.OVERLAY)
+        LS.set_keyboard_mode(self, LS.KeyboardMode.EXCLUSIVE)    # Esc works right away
+        LS.set_monitor(self, monitor)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, width_request=260)
+        box.add_css_class("settings-box")
+
+        top = Gtk.Box()
+        title = Gtk.Label(label="settings", xalign=0, hexpand=True)
+        title.add_css_class("title")
+        close = Gtk.Button(label="×", focusable=False)
+        close.add_css_class("close")
+        close.connect("clicked", lambda _b: app.close_settings())
+        top.append(title)
+        top.append(close)
+        box.append(top)
+
+        box.append(self._slider("show time", "show_time", SHOW_TIME_RANGE, "{}s"))
+        box.append(self._slider("tile size", "tile_size", TILE_SIZE_RANGE, "{}px"))
+        box.append(Gtk.Separator())
+
+        row = Gtk.Box(spacing=8)
+        row.append(Gtk.Label(label="share via tailscale", xalign=0, hexpand=True))
+        self.switch = Gtk.Switch(active=bool(cfg["share"]), valign=Gtk.Align.CENTER)
+        self.switch.connect("notify::active",
+                            lambda s, _p: app.set_option("share", s.get_active()))
+        row.append(self.switch)
+        box.append(row)
+
+        self.peers = Gtk.Label(xalign=0, wrap=True, max_width_chars=30)
+        self.peers.add_css_class("muted")
+        box.append(self.peers)
+        self.set_peers(None)
+
+        self.set_child(box)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+
+    def _slider(self, label: str, key: str, rng: tuple, fmt: str):
+        lo, hi, step = rng
+        value = Gtk.Label(label=fmt.format(self.app.cfg[key]), xalign=1, width_chars=6)
+        value.add_css_class("value")
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
+        scale.set_draw_value(False)
+        scale.set_value(self.app.cfg[key])
+
+        def changed(s):
+            v = int(round(s.get_value() / step) * step)
+            value.set_text(fmt.format(v))
+            if v != self.app.cfg[key]:
+                self.app.set_option(key, v)
+        scale.connect("value-changed", changed)
+
+        head = Gtk.Box()
+        head.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+        head.append(value)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        col.append(head)
+        col.append(scale)
+        return col
+
+    def set_peers(self, names):
+        if not self.app.cfg["share"]:
+            text = "off: this shelf stays on this machine"
+        elif names is None:
+            text = "looking for my other machines…"
+        elif names:
+            text = "online: " + ", ".join(names)
+        else:
+            text = "no other machine online with sharing on"
+        self.peers.set_text(text)
+
+    def _on_key(self, _ctrl, keyval, _code, _state):
+        if keyval == Gdk.KEY_Escape:
+            self.app.close_settings()
+            return True
+        return False
+
+
+# ── Sharing: Tailscale + app glue ────────────────────────────────────────────
+def tailscale_status():
+    try:
+        out = subprocess.run(["tailscale", "status", "--json"], capture_output=True,
+                             text=True, timeout=3, env=CLEAN_ENV)
+        return json.loads(out.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _ipv4(node: dict):
+    return next((ip for ip in node.get("TailscaleIPs") or [] if ":" not in ip), None)
+
+
+def same_user_peers(status: dict) -> list:
+    """(hostname, ip) of my other machines that are online right now."""
+    me = status.get("Self") or {}
+    out = []
+    for p in (status.get("Peer") or {}).values():
+        ip = _ipv4(p)
+        if p.get("Online") and ip and p.get("UserID") == me.get("UserID"):
+            out.append((p.get("HostName") or ip, ip))
+    return out
+
+
+class Share:
+    """Mirrors the shelf with my other Tailscale machines that have `share` on.
+
+    Nothing runs in the background but the listening socket: peers are looked up only when
+    something has to be sent. All network work happens in worker threads; results come back
+    to the GTK thread through GLib.idle_add."""
+
+    REMOVE_DELAY_S = 60     # a COPY drop may still be reading a received file after unstaging
+
+    def __init__(self, app):
+        self.app = app
+        self.listener = None
+        self.host = socket.gethostname()
+        self.root = runtime_dir() / "shared"
+        self._lock = threading.Lock()
+        self._incoming: set = set()       # ids being received right now
+        self.peers_seen: dict = {}        # ip -> hostname of peers that talked to us
+
+    @property
+    def on(self) -> bool:
+        return bool(self.app.cfg.get("share"))
+
+    @staticmethod
+    def _bg(fn, *args):
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    # listener (worker-thread side)
+    def _ensure_listener(self, status=None) -> bool:
+        with self._lock:
+            if not self.on:
+                return False
+            if self.listener:
+                return True
+            status = status or tailscale_status()
+            ip = _ipv4((status or {}).get("Self") or {})
+            if not ip:
+                return False                       # Tailscale not up yet: retry on next event
+            self.host = status["Self"].get("HostName") or self.host
+            try:
+                self.listener = Listener(ip, PORT, self, self._allow)
+            except OSError:
+                return False
+            return True
+
+    def _allow(self, ip: str) -> bool:
+        status = tailscale_status()
+        if not status or not self.on:
+            return False
+        if ip == _ipv4(status.get("Self") or {}):
+            return True                            # myself (local testing)
+        for host, peer_ip in same_user_peers(status):
+            if peer_ip == ip:
+                self.peers_seen[ip] = host
+                GLib.idle_add(self.app.refresh_peers)
+                return True
+        return False
+
+    def _peers(self) -> list:
+        status = tailscale_status()
+        if not status or not self._ensure_listener(status):
+            return []
+        return same_user_peers(status)
+
+    # GTK-thread API
+    def enable(self):
+        self._bg(self._sync, self._snapshot())
+
+    def disable(self):
+        with self._lock:
+            if self.listener:
+                self.listener.stop()
+                self.listener = None
+        self.peers_seen.clear()
+
+    def ensure_listener(self):
+        if self.on and not self.listener:
+            self._bg(self._ensure_listener)
+
+    def push_add(self, path: str):
+        if self.on:
+            self._bg(self._push_items, [self._item(path)])
+
+    def push_remove(self, ids: list, cleared: bool):
+        if self.on:
+            self._bg(self._push_remove, ids, cleared)
+
+    def probe(self, callback):
+        """callback(list of hostnames with sharing on), on the GTK thread."""
+        def work():
+            names = sorted(filter(None, (ask_hello(ip, PORT) for _host, ip in self._peers())))
+            GLib.idle_add(lambda: callback(names) or False)
+        self._bg(work)
+
+    def forget(self, paths: list):
+        """Delete received copies once they leave the shelf (after a grace period)."""
+        for p in paths:
+            try:
+                rel = Path(p).relative_to(self.root)
+            except ValueError:
+                continue                           # a local file: never touched
+            folder = self.root / rel.parts[0]
+            GLib.timeout_add_seconds(self.REMOVE_DELAY_S,
+                                     lambda f=folder: shutil.rmtree(f, ignore_errors=True) or False)
+
+    def _item(self, path: str):
+        m = self.app.shelf.meta.get(path)
+        if m is None:
+            return None                            # removed meanwhile (listener thread)
+        # origin stays None for my own items until it goes on the wire (see _wire): the
+        # Tailscale hostname is only known once Tailscale has answered.
+        return ({"id": m["id"], "origin": m["origin"], "name": Path(path).name,
+                 "dir": os.path.isdir(path)}, path)
+
+    def _wire(self, item: dict) -> dict:
+        return {**item, "origin": item["origin"] or self.host}
+
+    def _snapshot(self) -> list:
+        return [it for it in map(self._item, list(self.app.shelf.paths)) if it]
+
+    # worker-thread work
+    def _push_remove(self, ids: list, cleared: bool):
+        for _host, ip in self._peers():
+            send_remove(ip, PORT, ids, cleared)
+
+    def _sync(self, mine: list):
+        """On startup / switch on: pull what the peers have, then offer ours (union)."""
+        peers = self._peers()
+        for _host, ip in peers:
+            for item in ask_state(ip, PORT) or []:
+                if not self.wants(item.get("id", "")):
+                    continue
+                self._incoming.add(item["id"])
+                got = fetch(ip, PORT, item["id"], self.root)
+                if got:
+                    self.on_add(*got)
+                else:
+                    self._incoming.discard(item["id"])
+        for _host, ip in peers:
+            for item, path in mine:
+                send_add(ip, PORT, self._wire(item), path)
+
+    # protocol handler (called from listener threads)
+    def hostname(self):
+        return self.host
+
+    def wants(self, item_id: str) -> bool:
+        shelf = self.app.shelf
+        return (bool(item_id) and item_id not in self._incoming
+                and not shelf.path_for(item_id) and len(shelf.paths) < MAX_ITEMS)
+
+    def dest_for(self, item_id: str):
+        self._incoming.add(item_id)
+        return self.root / item_id
+
+    def abort(self, item_id: str):
+        self._incoming.discard(item_id)
+        shutil.rmtree(self.root / item_id, ignore_errors=True)
+
+    def on_add(self, item: dict, path: str):
+        def apply():
+            self._incoming.discard(item["id"])
+            if not self.app.shelf.add(path, item["id"], item["origin"], remote=True):
+                shutil.rmtree(self.root / item["id"], ignore_errors=True)
+            return False
+        GLib.idle_add(apply)
+
+    def on_remove(self, ids: list, cleared: bool):
+        def apply():
+            shelf = self.app.shelf
+            if cleared:
+                shelf.clear(remote=True)
+            else:
+                shelf.remove([p for p in map(shelf.path_for, ids) if p], remote=True)
+            return False
+        GLib.idle_add(apply)
+
+    def items(self) -> list:
+        return [self._wire(item) for item, _path in self._snapshot()]
+
+    def item(self, item_id):
+        path = self.app.shelf.path_for(item_id or "")
+        found = self._item(path) if path and os.path.exists(path) else None
+        return (self._wire(found[0]), found[1]) if found else None
+
+    def _push_items(self, items: list):
+        items = [it for it in items if it]
+        for _host, ip in self._peers() if items else []:
+            for item, path in items:
+                send_add(ip, PORT, self._wire(item), path)
+
+
 # ── Application ──────────────────────────────────────────────────────────────
 class ShelfApp(Gtk.Application):
-    COMMANDS = ("toggle", "paste", "clear", "reload-theme", "quit")
+    COMMANDS = ("toggle", "paste", "clear", "settings", "reload-theme", "quit")
 
     def __init__(self):
         super().__init__(application_id=APP_ID,
@@ -647,6 +1247,11 @@ class ShelfApp(Gtk.Application):
         self._theme_id = 0
         self._css = Gtk.CssProvider()
         self._thumbs: dict = {}
+        self.share = Share(self)
+        self.settings = None               # SettingsWindow while open
+        self._unsaved: dict = {}
+        self._save_id = 0
+        self._size_id = 0
 
     # lifecycle
     def do_startup(self):
@@ -658,6 +1263,11 @@ class ShelfApp(Gtk.Application):
         monitors.connect("items-changed", lambda *_: self.sync_windows())
         self.sync_windows()
         self.shelf.on_items.append(self._on_items_changed)
+        self.shelf.on_local_add.append(self.share.push_add)
+        self.shelf.on_local_remove.append(self.share.push_remove)
+        self.shelf.on_removed.append(self.share.forget)
+        if self.cfg["share"]:
+            self.share.enable()             # pull what my other machines have right now
         try:                                # follow `omarchy theme set` live
             self._theme_mon = Gio.File.new_for_path(str(THEME_DIR)).monitor_directory(
                 Gio.FileMonitorFlags.WATCH_MOVES, None)
@@ -679,6 +1289,11 @@ class ShelfApp(Gtk.Application):
             self.paste()
         elif name == "clear":
             self.shelf.clear()
+        elif name == "settings":
+            win = self.focused_window()
+            if win:
+                self.open_on(win)
+                self.toggle_settings(win)
         elif name == "reload-theme":
             self.reload_theme()
         elif name == "quit":
@@ -724,12 +1339,74 @@ class ShelfApp(Gtk.Application):
         self.active = None
 
     def toggle(self):
+        self.share.ensure_listener()        # Tailscale may not have been up at login
         if self.active is not None and self.active.is_open:
+            self.close_settings()
             self.close_all()
         else:
             win = self.focused_window()
             if win:
                 self.open_on(win, self.cfg["show_time"])
+
+    # settings
+    def toggle_settings(self, win):
+        if self.settings is not None:
+            self.close_settings()
+            return
+        self.cancel_collapse()
+        self.settings = SettingsWindow(self, win.monitor)
+        self.settings.present()
+        for w in self.windows.values():
+            w.gear.add_css_class("active")
+        self.refresh_peers()
+
+    def close_settings(self):
+        if self.settings is None:
+            return
+        self.settings.close()
+        self.settings = None
+        for w in self.windows.values():
+            w.gear.remove_css_class("active")
+        self.maybe_collapse_soon()
+
+    def refresh_peers(self):
+        if self.settings is None:
+            return False
+        self.settings.set_peers(None)
+        if self.cfg["share"]:
+            self.share.probe(lambda names: self.settings and self.settings.set_peers(names))
+        return False
+
+    def set_option(self, key: str, value):
+        """Apply a setting live and save it (debounced: sliders fire on every step)."""
+        self.cfg[key] = value
+        self._unsaved[key] = value
+        if self._save_id:
+            GLib.source_remove(self._save_id)
+        self._save_id = GLib.timeout_add(300, self._save)
+        if key == "tile_size":
+            if self._size_id:
+                GLib.source_remove(self._size_id)
+            self._size_id = GLib.timeout_add(150, self._apply_tile_size)
+        elif key == "share":
+            if value:
+                self.share.enable()
+            else:
+                self.share.disable()
+            self.refresh_peers()
+
+    def _save(self):
+        self._save_id = 0
+        save_config(self._unsaved)
+        self._unsaved = {}
+        return False
+
+    def _apply_tile_size(self):
+        self._size_id = 0
+        self._thumbs.clear()                # cached at the old size
+        for win in self.windows.values():
+            win.apply_tile_size()
+        return False
 
     def cancel_collapse(self):
         if self._collapse_id:
@@ -745,7 +1422,7 @@ class ShelfApp(Gtk.Application):
     def _collapse(self):
         self._collapse_id = 0
         hovered = self.active is not None and self.active.hover
-        if not self.shelf.paths and not hovered:
+        if not self.shelf.paths and not hovered and self.settings is None:
             self.close_all()
         return False
 
