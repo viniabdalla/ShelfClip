@@ -28,6 +28,7 @@ _ensure_layer_shell_preload()
 
 import json  # noqa: E402
 import mimetypes  # noqa: E402
+import signal  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -237,6 +238,11 @@ def cursor_over_window() -> bool:
 
 def runtime_dir() -> Path:
     return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / "shelfclip"
+
+
+def state_path() -> Path:
+    """{"count": N} while running; the Omarchy bar widget watches it."""
+    return runtime_dir() / "state.json"
 
 
 def temp_path(prefix: str, ext: str) -> Path:
@@ -1266,6 +1272,8 @@ class ShelfApp(Gtk.Application):
         self.shelf.on_local_add.append(self.share.push_add)
         self.shelf.on_local_remove.append(self.share.push_remove)
         self.shelf.on_removed.append(self.share.forget)
+        self._write_state()
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self._on_sigterm)
         if self.cfg["share"]:
             self.share.enable()             # pull what my other machines have right now
         try:                                # follow `omarchy theme set` live
@@ -1277,6 +1285,24 @@ class ShelfApp(Gtk.Application):
 
     def do_activate(self):
         pass
+
+    def do_shutdown(self):
+        state_path().unlink(missing_ok=True)
+        Gtk.Application.do_shutdown(self)
+
+    def _on_sigterm(self):                 # the Omarchy plugin stops us with SIGTERM
+        self.quit()
+        return False
+
+    def _write_state(self):
+        path = state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"count": len(self.shelf.paths)}))
+            tmp.replace(path)              # atomic, so the watcher never reads half a file
+        except OSError:
+            pass
 
     def do_command_line(self, cmd):
         args = cmd.get_arguments()[1:]
@@ -1427,6 +1453,7 @@ class ShelfApp(Gtk.Application):
         return False
 
     def _on_items_changed(self):
+        self._write_state()
         if self.shelf.paths:
             if self.active is None or not self.active.is_open:
                 win = self.focused_window()

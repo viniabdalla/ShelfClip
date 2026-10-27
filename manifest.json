@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "viniabdalla.shelfclip",
+  "name": "ShelfClip",
+  "version": "1.0.0",
+  "author": "viniabdalla",
+  "description": "Yoink-style file shelf: drag files to the right screen edge to stage them, drag them out into any app later. Follows your Omarchy theme; optional shared shelf across your Tailscale machines.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "plugin/Service.qml",
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "ShelfClip",
+    "description": "Files on the shelf. Click to open or close it, right click for settings.",
+    "category": "Productivity",
+    "aliases": ["shelf", "files", "drop", "yoink"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

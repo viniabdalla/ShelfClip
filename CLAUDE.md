@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ShelfClip — a minimal Yoink-style file shelf for Omarchy (Hyprland / Wayland). A collapsed edge strip on the right of each monitor opens into a panel in the top-right corner (under the bar) when a file is dragged onto it or `shelfclip toggle` runs; the panel grows downward as tiles are added.
 
-**Stack:** Python 3 + GTK4 (PyGObject) + gtk4-layer-shell. Single file: `main.py`. The old Windows/PyQt6 app lives on the `windows-pyqt6` branch (and `main`).
+**Stack:** Python 3 + GTK4 (PyGObject) + gtk4-layer-shell. Single file: `main.py`, plus a small Omarchy plugin (`manifest.json` + `plugin/`). `omarchy` is the default branch; the old Windows/PyQt6 app lives on the `windows-pyqt6` branch (and `main`). MIT licensed.
 
 ## Running
 
 ```bash
 ./shelfclip                  # start (or `python main.py`)
 ./shelfclip toggle|paste|clear|settings|reload-theme|quit   # control the running instance
-./install.sh                 # link ~/.local/bin/shelfclip, autostart, Ctrl+Y bind, restart (idempotent)
+./install.sh [--yes]         # link ~/.local/bin/shelfclip, restart; asks before autostart + Ctrl+Y (idempotent)
+omarchy plugin validate .    # check manifest.json before pushing
 python3 tests/test_share.py -v   # sharing tests (not `-m unittest`: main.py re-execs with LD_PRELOAD)
 ```
 
@@ -39,6 +40,7 @@ Real drag-and-drop can't be automated here; test it by hand.
 | `Share` | Tailscale glue + protocol handler: listener on the Tailscale IPv4 port 47811 while `share` is on, peer lookup via `tailscale status --json` (same `UserID`, online), push on local add/remove, pull+offer on enable. Worker threads only; results go back through `GLib.idle_add`. |
 | `ShelfApp` | `Gtk.Application` (`HANDLES_COMMAND_LINE`, single instance via D-Bus). Decides which window is open (`open_on`, `close_all`, `toggle`), thumbnails, `wl-paste` clipboard, theme reload. |
 | `load_palette` / `build_css` | Read the active Omarchy theme's `colors.toml`, generate the CSS. |
+| `state_path()` | `$XDG_RUNTIME_DIR/shelfclip/state.json` = `{"count": N}`, rewritten atomically on every item change, deleted in `do_shutdown`. Read by the bar widget. SIGTERM quits cleanly (`_on_sigterm`). |
 
 Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `main.py`); the settings window writes it through `save_config()` (merge, debounced 300 ms). `ShelfApp.set_option()` applies a key live; `tile_size` rebuilds the tiles (`ShelfWindow.apply_tile_size`, debounced 150 ms).
 
@@ -61,7 +63,16 @@ Config lives in `~/.config/shelfclip/config.json` (`DEFAULTS` at the top of `mai
 - Items are identified by `meta[path]["id"]` (uuid hex), the same on every machine. Received files go to `$XDG_RUNTIME_DIR/shelfclip/shared/<id>/<name>` and are deleted 60 s after leaving the shelf (a COPY drop may still be reading). Local originals are never touched.
 - `origin` is `None` for items staged here; `Share._wire()` fills in the Tailscale hostname only when the item is sent (the hostname is known once Tailscale has answered). Tiles show an `origin` badge when it isn't this host.
 - `Listener` accepts only the machine's own IP and same-user peers (`Share._allow`, rechecked per connection). Receivers strip any path from a peer's file name and unpack tars with `filter="data"`.
-- Machines run this same code; deploy = push, then `git pull && ./install.sh` on each machine.
+- Machines run this same code; deploy = push, then `git pull && ./install.sh` on each checkout machine (or `omarchy plugin update viniabdalla.shelfclip` where it is installed as a plugin).
+
+## Omarchy plugin
+
+- Listed on the Omarchy plugin marketplace (plugins.omarchy.org, submissions via issues on `omacom/omarchy-plugin-marketplace`). `omarchy plugin add <repo>` clones the **default branch** into `~/.config/omarchy/plugins/viniabdalla.shelfclip`, so the whole repo is the plugin; the validator rejects any symlink in it.
+- `manifest.json` (root): id `viniabdalla.shelfclip`, kinds `service` + `bar-widget`. Bump `version` on releases.
+- `plugin/Service.qml` starts `../shelfclip` on load (single instance: a no-op if one already runs). The shell keeps services across rescans and destroys them only on disable/remove/shell exit; `onDestruction` waits 3 s, asks `omarchy-plugin-list` whether the plugin is still enabled, and otherwise `pkill -TERM`s only the `main.py` of this checkout.
+- `plugin/BarWidget.qml` watches `state.json` (`FileView`, plus a 5 s re-read) and runs `shelfclip toggle` / `settings` via `Util.execArgv`.
+- Testing: install a real **copy** (`rsync -a --exclude .git ./ ~/.config/omarchy/plugins/viniabdalla.shelfclip/`), not a symlink: Qt refuses a symlinked plugin dir whose name differs from the target only by case ("File name case mismatch", e.g. `viniabdalla.shelfclip` → `Shelfclip`). The shell also caches compiled QML by URL, so an edited entry point isn't reloaded until the shell restarts (`omarchy-restart-shell`). `omarchy-shell` IPC times out at 2 s, which `rescanPlugins` / `plugin enable` can exceed here: set `OMARCHY_SHELL_IPC_TIMEOUT=30s`. From a non-session shell also export `WAYLAND_DISPLAY=wayland-1` and `OMARCHY_PATH=/usr/share/omarchy`. Logs: `qs log -n -p /usr/share/omarchy/shell`.
+- `install.sh` is the non-plugin path. Store rule: never edit user config without consent, so it asks (or needs `--yes`) before touching `autostart.lua` / `bindings.lua`.
 
 ## Wayland / layer-shell gotchas
 

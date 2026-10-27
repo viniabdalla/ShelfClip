@@ -4,7 +4,7 @@ A minimal, Yoink-style file shelf for [Omarchy](https://omarchy.org) (Hyprland /
 
 It sits collapsed on the right screen edge, just under the bar. Drag a file to that edge and a small panel opens in the top-right corner; drop the file and it stays staged there. Every new file adds a tile and the panel grows downward. Drag tiles back out into any app or folder when you need them.
 
-The Windows / PyQt6 version lives on the `windows-pyqt6` branch.
+The Windows / PyQt6 version lives on the [`windows-pyqt6`](https://github.com/viniabdalla/ShelfClip/tree/windows-pyqt6) branch.
 
 ## Features
 
@@ -16,6 +16,7 @@ The Windows / PyQt6 version lives on the `windows-pyqt6` branch.
 - Colors follow the active Omarchy theme and update live when you switch themes
 - Settings window (the ⚙ in the panel header): show time and tile size sliders, live
 - Shared shelf over Tailscale: what you stage on one of your machines shows up on the others
+- Omarchy plugin: starts with the shell, bar icon with the file count (click to open, right click for settings)
 
 ## Requirements
 
@@ -25,14 +26,36 @@ Arch / Omarchy, no pip install:
 pacman -S python-gobject gtk4 gtk4-layer-shell wl-clipboard
 ```
 
+All four ship with Omarchy. `tailscale` is only needed for the shared shelf.
+
 ## Install
 
+### As an Omarchy plugin
+
 ```bash
-git clone -b omarchy https://github.com/viniabdalla/ShelfClip.git && cd ShelfClip
+omarchy plugin add https://github.com/viniabdalla/ShelfClip.git --enable
+```
+
+The plugin starts ShelfClip with the Omarchy shell and adds a shelf icon to the bar showing how many files are staged: left click opens or closes the shelf, right click opens the settings. It doesn't touch your Hyprland config. For a keybind, add one yourself (see [Keybind](#keybind)), pointing at `~/.config/omarchy/plugins/viniabdalla.shelfclip/shelfclip`.
+
+```bash
+omarchy plugin update viniabdalla.shelfclip   # update
+omarchy plugin disable viniabdalla.shelfclip  # stop it (the bar icon goes away too)
+omarchy plugin remove viniabdalla.shelfclip   # uninstall
+```
+
+Disabling or removing the plugin stops the ShelfClip it started. Your settings stay in `~/.config/shelfclip/`; delete that folder to remove them too.
+
+### From a checkout
+
+```bash
+git clone https://github.com/viniabdalla/ShelfClip.git && cd ShelfClip
 ./install.sh
 ```
 
-`install.sh` links `~/.local/bin/shelfclip` to the checkout, adds ShelfClip to Hyprland's autostart, binds **Ctrl+Y** to `shelfclip toggle` (replacing an older ShelfClip bind such as Super+Y), backs up any Hypr file it edits, and restarts the running instance. Run it again after every `git pull`; a second run changes nothing.
+`install.sh` links `~/.local/bin/shelfclip` to the checkout and restarts the running instance. It then **asks** before adding ShelfClip to Hyprland's autostart and binding **Ctrl+Y** to `shelfclip toggle` (replacing an older ShelfClip bind such as Super+Y); it backs up any Hypr file it edits. Run it with `--yes` to skip the question (e.g. over ssh, where it can't ask and otherwise leaves the Hypr files alone). Run it again after every `git pull`; a second run changes nothing.
+
+To uninstall: `shelfclip quit`, delete `~/.local/bin/shelfclip`, the `shelfclip` lines in `~/.config/hypr/autostart.lua` and `bindings.lua` (or restore their `.bak.shelfclip-*` backups), and the checkout. Settings live in `~/.config/shelfclip/`.
 
 ## Run
 
@@ -48,9 +71,9 @@ git clone -b omarchy https://github.com/viniabdalla/ShelfClip.git && cd ShelfCli
 
 `shelfclip <command>` talks to the running instance, or starts one if none is running.
 
-### Hyprland setup by hand
+### Keybind
 
-`install.sh` does this for you. To do it by hand, add to `~/.config/hypr/autostart.lua` and `~/.config/hypr/bindings.lua`:
+`install.sh` can do this for you. To do it by hand, add to `~/.config/hypr/autostart.lua` and `~/.config/hypr/bindings.lua`:
 
 ```lua
 -- autostart.lua
@@ -119,3 +142,7 @@ ShelfClip instances talk directly over TCP port 47811 on the Tailscale address o
 - Hyprland ignores Ctrl/Shift during a drag (it doesn't implement modifier-based copy/move/link), so the choice is made when the drag starts, by what the shelf offers to the file manager.
 - Wayland has no global hotkeys for clients; the keybind is a Hyprland `bind` that runs `shelfclip toggle`.
 - `main.py` re-executes itself once with `LD_PRELOAD` set to gtk4-layer-shell, which is required when it is used from Python.
+
+## License
+
+[MIT](LICENSE)
